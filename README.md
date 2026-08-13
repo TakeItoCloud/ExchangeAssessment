@@ -80,6 +80,8 @@ data and is gitignored — never commit it.
 
 ## Development
 
+Development workflow (branching, PRs, releases): [`docs/WORKFLOW.md`](docs/WORKFLOW.md).
+
 Run the tests:
 
 ```powershell
@@ -95,6 +97,20 @@ Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
 Both must be clean — zero failing tests, zero analyzer findings — before a phase in
 [PORT-PLAN.md](PORT-PLAN.md) may be marked Done. The same two commands run in CI on every
 push and pull request (see [.github/workflows/ci.yml](.github/workflows/ci.yml)).
+
+### Green gate
+
+The commands that prove GREEN in this repository, per section 7 of
+[`docs/WORKFLOW.md`](docs/WORKFLOW.md):
+
+```powershell
+Invoke-Pester -CI
+Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
+```
+
+Both must report zero failures and zero findings. This is the default gate named in
+section 7 of the workflow, run from the repository root, and it is what
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs.
 
 `PSScriptAnalyzerSettings.psd1` suspends four rules for the inherited code; each is a backlog
 row in [PORT-PLAN.md](PORT-PLAN.md) and the settings file records the hit count and the work
