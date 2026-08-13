@@ -1,6 +1,9 @@
 # Build output
 dist/
 
+# Run output - contains real environment evidence, never commit
+output/
+
 # Logs
 *.log
 
