@@ -33,6 +33,7 @@ mirrors are identical to the canonical files rather than merely similar to them.
 Nothing outside those three files changed: `.githooks/pre-push` and `.gitattributes` were
 compared against the template by blob SHA and already matched, and `README.md`, `ci.yml`,
 `src/` and `tests/` are untouched.
+
 ### Added — 2026-08-13 (phase P4.4)
 
 - Trunk-based workflow conventions backfilled from `TakeItoCloud/template-ps-tool`, which
