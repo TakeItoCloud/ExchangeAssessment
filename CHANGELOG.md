@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — 2026-08-31 (phase P9)
+
+The assessment is reworked around a configuration inventory that is separate from the
+findings, and the reporting layer is replaced with raw CSV and a single consolidated JSON.
+
+**Inventory model.** A collector now returns inventory sections and findings
+(`New-ExchCollectorResult`) instead of one finding plus an ad-hoc JSON blob. A section is a
+table with a stable key, an area, an ordered column list and rows already flattened to
+CSV-safe scalars, so the report writers render whatever sections exist without knowing
+anything about Exchange. This is what removes the pressure on a collector to invent a finding
+when all it had was an inventory to report.
+
+**Nothing is hardcoded.** `Config/Thresholds.psd1` holds every value the tool judges against —
+supported builds and operating systems, certificate expiry windows, queue and backup
+thresholds, the Microsoft-recommended anti-malware exclusions, TLS and DNS expectations.
+`-ConfigPath` merges a client-specific `.psd1` over those defaults, so the same tool assesses
+organisations with different baselines without editing code. `-Outcome` and `-Rationale` are
+now mandatory on `New-ExchFinding`, and a test fails the build if any collector assigns a
+literal `Compliant`.
+
+**Output is CSV and JSON.** `csv/<section>.csv` per configuration area plus `csv/findings.csv`,
+and one `assessment.json` carrying the inventory, the findings with their rationale and
+Microsoft references, and the control catalog. High-cardinality sections are summarised in the
+JSON (`-FullInventory` emits everything) and the file splits into per-area parts above a size
+budget; the CSVs always hold every row. The reports are generated before the run closes, so
+`hash-manifest.json` now covers them.
+
+**Fixed**
+
+- `LOG.EX-01` never produced a finding. The catalog gave it domain `Monitoring`, which was not
+  in `New-ExchFinding`'s `ControlDomain` ValidateSet, so the collector threw on every run and
+  the dispatcher swallowed it. The ValidateSet gains `Monitoring`, `Compliance`, `Client`,
+  `Network` and `Cloud`, and a test now fails if the catalog and the ValidateSet drift apart
+  again.
+- `EX.ADM-01` and `EX.VDIR-01` returned a literal `Compliant`/`Pass` regardless of what they
+  found. Both now evaluate: accepted domains check for wildcard and external relay domains, a
+  missing or duplicated default, and auto-forwarding on the default remote domain; virtual
+  directories check for missing external URLs, plain HTTP, Basic authentication on externally
+  published directories, inconsistent URLs across servers, and a missing Autodiscover SCP.
+- `EX.CH-01` scored an Exchange 2019 organisation as `PartiallyCompliant`. Exchange 2016 and
+  2019 both reached end of support on 2025-10-14, so only Exchange Server SE is supported.
+  `Catalog/BuildTable.ps1` provides real build currency and carries the date it was last
+  refreshed; a build newer than the table is reported as unverifiable, never as current.
+- `ENV.OS-01` used Windows Server 2016 as its floor; Exchange SE requires Windows Server 2019
+  or later.
+- `ENV.VERS-01` checked `Get-ADRootDSE.schemaVersion`, which is the Active Directory schema
+  version rather than the Exchange one. It now reads `rangeUpper` on
+  `ms-Exch-Schema-Version-Pt` and `objectVersion` on both the organisation container and
+  Microsoft Exchange System Objects — the three values Exchange setup actually gates on.
+- The open-relay test in `TR.CO-01` matched the literal string `0.0.0.0-255.255.255.255` and
+  missed `0.0.0.0/0` and the IPv6 equivalents.
+- `MB.AV-01` declared the Microsoft-recommended exclusions and never compared against them
+  (PORT-PLAN P4). It now reports what is missing per server.
+- `MB.DB-01` collected copy queue lengths and content index state and never evaluated them,
+  and did not look at backups at all.
+- `Export-ExchEvidenceBundle` ran after `Close-ExchRun`, so nothing it produced was covered by
+  the hash manifest.
+- `README.md` credited Python 3 and `python-docx` for a Word report that was never generated
+  that way, and showed the entry script with no arguments although `-TenantHint` is mandatory.
+
+**Removed**
+
+- The Word, PDF and Markdown output paths, including `New-ExchWordReport`, the pandoc calls,
+  and `Scripts/Generate-WordReport.py`, which was a seven-line stub nothing ever called. The
+  230-line `Write-ExchMarkdown` inside the bundle exporter is gone with them: it hardcoded a
+  renderer per evidence-file shape and would not have survived the collector expansion.
+- Two of the four PSScriptAnalyzer suspensions (PORT-PLAN P2). `PSAvoidUsingEmptyCatchBlock`
+  went from 19 hits to zero and `PSUseApprovedVerbs` from 2 to zero, so both now fail the
+  build. The remaining two are documented in `PSScriptAnalyzerSettings.psd1` as cosmetic
+  rather than outstanding.
+
+**Collector dispatch** is driven by `Catalog/CollectorRegistry.ps1`, an ordered registry with
+declared dependencies, replacing 148 lines of hand-written try/catch. A collector that throws
+now becomes an `Unknown`/`HardFail` finding naming the error, so a gap in the assessment is
+visible in the output rather than only in the log.
+
 ### Changed — 2026-08-14 (phase P5.3)
 
 The three workflow files backfilled in P4.4 are refreshed from

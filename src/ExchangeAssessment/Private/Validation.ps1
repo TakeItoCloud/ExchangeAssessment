@@ -37,10 +37,6 @@ function Get-ExchPreflightReport {
         $warnings.Add('Unable to probe ActiveDirectory module presence.') | Out-Null
     }
 
-    if (-not (Get-Command pandoc -ErrorAction SilentlyContinue)) {
-        $warnings.Add('pandoc not found; PDF export will be skipped.') | Out-Null
-    }
-
     [pscustomobject]@{
         warnings = @($warnings)
     }

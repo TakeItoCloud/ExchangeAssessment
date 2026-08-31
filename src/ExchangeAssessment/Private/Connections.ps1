@@ -4,7 +4,7 @@ Connection helpers for Exchange Assessment (local Exchange shell + AD module).
 
 Set-StrictMode -Version Latest
 
-function Ensure-ExchLocalShell {
+function Assert-ExchLocalShell {
     [CmdletBinding()]
     param([Parameter(Mandatory)][ValidateNotNull()]$Run)
 
@@ -14,7 +14,7 @@ function Ensure-ExchLocalShell {
     }
 }
 
-function Ensure-ExchADModule {
+function Assert-ExchADModule {
     [CmdletBinding()]
     param([Parameter(Mandatory)][ValidateNotNull()]$Run)
 

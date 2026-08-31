@@ -2,36 +2,45 @@
 
 ## Purpose
 
-ExchangeAssessment collects audit-ready evidence from an on-premises or hybrid Exchange
-organisation and turns it into findings against a control catalog. A run drives 15 collectors
-across environment, Exchange version, DAG, databases, certificates, transport, hybrid,
-identity sync and event logs, writes the raw output as evidence files, and exports a bundle
-with a hash manifest, a CAB remediation sheet and a Word report.
+ExchangeAssessment reads an on-premises or hybrid Exchange organisation and reports two things:
+the **configuration** it found, and the **problems** in that configuration. It is read-only —
+every collector reads, and the only writes are into the local run folder.
 
-It is read-only against Exchange and Active Directory: every collector reads configuration
-and writes only to the local run folder.
+A run drives 15 collectors across environment, Exchange version, databases, DAG, transport,
+certificates, anti-malware, hybrid, identity sync, accepted domains, virtual directories and
+event logs, then writes:
+
+- **`csv/`** — one CSV per configuration area, plus `csv/findings.csv`. The complete record.
+- **`assessment.json`** — the whole assessment in one file: configuration inventory, findings
+  with the reasoning behind each one, the Microsoft article behind each control, and the
+  control catalog. Sized so it can be uploaded to an assistant for remediation advice.
+- **`evidence/`** — the raw per-control JSON, `hash-manifest.json` covering every file the run
+  produced, and a ZIP of the lot.
 
 Extracted from `infra-scripting-suite/powershell/Assessments/ExchangeAssessment`.
 
-## Controls
+## What it reports on
 
-| Control | Collector |
+| Control | Covers |
 | --- | --- |
-| `ENV.OS-01` | Exchange server operating system |
-| `ENV.VERS-01` | Domain, forest and schema versions |
-| `EX.CH-01` | Exchange version and cumulative update |
-| `EX.ADM-01` | Accepted domains |
-| `EX.VDIR-01` | Virtual directories |
-| `DAG-01` | Database availability group health |
-| `MB.DB-01` | Mailbox database health |
-| `MB.AV-01` | Antivirus exclusions |
-| `TR.CO-01` | Transport connectors, including open-relay detection |
-| `CERT-01` | Certificates and expiry |
-| `AA.SPAM-01` | Anti-malware and anti-spam configuration |
-| `HYB-01` | Hybrid configuration |
-| `ID.SYNC-01` | Entra Connect / ADSync status |
-| `LOG.EX-01` | Exchange event log errors |
-| `UPG-01` | Subscription Edition readiness roll-up |
+| `ENV.VERS-01` | Forest and domain functional levels; Exchange AD preparation (`rangeUpper`, both `objectVersion` values) |
+| `ENV.OS-01` | Server operating system supportability, uptime, free disk |
+| `EX.CH-01` | Exchange product version, support state, and build currency against a dated build table |
+| `UPG-01` | Exchange Server SE readiness, rolled up from the three above |
+| `MB.DB-01` | Database configuration (paths, size, quotas, retention, circular logging, backups) and copy health |
+| `DAG-01` | DAG membership, witness and quorum, replication networks |
+| `TR.CO-01` | Send and receive connectors: open relay, TLS, authentication, size limits |
+| `CERT-01` | Certificate expiry, key size, signature algorithm, service bindings, self-signed |
+| `MB.AV-01` | Anti-malware exclusions, reported as what is **missing** per server |
+| `AA.SPAM-01` | Malware agent and anti-spam filter posture |
+| `HYB-01` | Hybrid configuration, intra-org connectors, OAuth, federation, organization relationships |
+| `ID.SYNC-01` | Directory synchronisation service and cycle age |
+| `LOG.EX-01` | Exchange-related error and critical events, grouped by provider and event id |
+| `EX.ADM-01` | Accepted domains, remote domains, email address policies |
+| `EX.VDIR-01` | Nine virtual directory types, Outlook Anywhere, Autodiscover SCP |
+
+Every finding states an outcome **and** the reasoning that produced it. A control that could
+not be evaluated reports `Unknown` with the reason, never a silent pass.
 
 ## Requirements
 
@@ -39,17 +48,17 @@ Extracted from `infra-scripting-suite/powershell/Assessments/ExchangeAssessment`
   Exchange server, or a remote EMS session. The manifest declares 5.1 with
   `CompatiblePSEditions = @('Desktop','Core')`; do not raise it.
 - Exchange Server, with `Get-ExchangeServer` available in the session
-- RSAT `ActiveDirectory` — for the domain, forest and schema collectors
-- `ADSync` — optional; the identity sync collector degrades without it
-- Python 3 with `python-docx` — for the Word report (`New-ExchWordReport`)
+- RSAT `ActiveDirectory` — for the domain, forest and schema collector
+- `ADSync` — optional; the identity sync collector reports "not assessed from here" without it
 - [Pester](https://pester.dev) 5.0+ and
   [PSScriptAnalyzer](https://github.com/PowerShell/PSScriptAnalyzer) 1.21+ — for the quality gate
 
 ## Permissions
 
-The current Windows / AD context is used — no separate credential prompt. View-Only
-Organization Management in Exchange plus domain read is enough for most collectors; the event
-log and AV exclusion collectors need local administrative rights on the Exchange servers.
+The current Windows and Active Directory context is used — no separate credential prompt.
+View-Only Organization Management in Exchange plus domain read covers most collectors. The
+event log and anti-malware exclusion collectors need local administrative rights on the
+Exchange servers.
 
 ## Install
 
@@ -61,42 +70,64 @@ Import-Module .\src\ExchangeAssessment\ExchangeAssessment.psd1 -Force
 
 ## Usage
 
-```powershell
-.\scripts\Invoke-ExchAssess.ps1
+`-TenantHint` is mandatory; it names the run folder.
 
-# Skip the AD domain/forest/schema queries
-.\scripts\Invoke-ExchAssess.ps1 -SkipDomainQueries
+```powershell
+# Assess an organisation
+.\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso
+
+# Skip the Active Directory domain/forest/schema queries
+.\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -SkipDomainQueries
+
+# Put every inventory row in assessment.json instead of summarising the large sections
+.\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -FullInventory
+
+# Assess against a client-specific baseline
+.\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -ConfigPath .\contoso-thresholds.psd1
 ```
 
-The script creates a run, collects, persists `findings.json`, closes the run and exports the
-bundle, then returns a summary object carrying `FindingsCount`, `FindingsPath`, `BundleZip`,
-`RunFolder` and `HashManifest`.
+The script returns a summary object carrying `FindingsCount`, `SectionCount`, `CollectorsRun`,
+`CollectorsSkipped`, `CollectorsFailed`, `FindingsPath`, `AssessmentJson`, `CsvFolder`,
+`CsvFileCount`, `BundleZip`, `RunFolder` and `HashManifest`.
 
-### Outputs
+### Output layout
 
-A run writes evidence files grouped by control domain, a `hash-manifest.json` covering them,
-a CAB remediation CSV, and the Word technical report. Run output contains real environment
-data and is gitignored — never commit it.
+```
+<OutputRoot>/<tenant>-<utc timestamp>-<run id>/
+  assessment.json           the whole assessment in one file
+  csv/                      one CSV per configuration area, plus findings.csv
+  evidence/                 raw per-control JSON, and findings/findings.json
+  generated/                control catalog and framework crosswalks
+  logs/                     run.jsonl and the transcript
+  hash-manifest.json        SHA256 over everything above
+  ExchEvidence-*.zip        all of it, packed
+```
+
+Run output contains real environment data and is gitignored — never commit it.
+
+### Tuning it per client
+
+Every value the tool judges against lives in
+[`src/ExchangeAssessment/Config/Thresholds.psd1`](src/ExchangeAssessment/Config/Thresholds.psd1)
+— supported builds and operating systems, certificate expiry windows, queue and backup
+thresholds, the recommended anti-malware exclusions, TLS and DNS expectations. Nothing is baked
+into collector code.
+
+To assess a client whose baseline differs, copy the keys you want to change into your own
+`.psd1` and pass it with `-ConfigPath`. Your values are merged over the defaults, so anything
+you leave out keeps the default:
+
+```powershell
+@{
+    Certificate = @{ ExpiryWarningDays = 45 }
+    Dag         = @{ RequireHighAvailability = $true }
+    Database    = @{ MaxBackupAgeDays = 1 }
+}
+```
 
 ## Development
 
 Development workflow (branching, PRs, releases): [`docs/WORKFLOW.md`](docs/WORKFLOW.md).
-
-Run the tests:
-
-```powershell
-Invoke-Pester
-```
-
-Run the linter:
-
-```powershell
-Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
-```
-
-Both must be clean — zero failing tests, zero analyzer findings — before a phase in
-[PORT-PLAN.md](PORT-PLAN.md) may be marked Done. The same two commands run in CI on every
-push and pull request (see [.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ### Green gate
 
@@ -108,13 +139,18 @@ Invoke-Pester -CI
 Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
 ```
 
-Both must report zero failures and zero findings. This is the default gate named in
-section 7 of the workflow, run from the repository root, and it is what
-[.github/workflows/ci.yml](.github/workflows/ci.yml) runs.
+Both must report zero failures and zero findings, run from the repository root. This is what
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs on every push and pull request.
 
-`PSScriptAnalyzerSettings.psd1` suspends four rules for the inherited code; each is a backlog
-row in [PORT-PLAN.md](PORT-PLAN.md) and the settings file records the hit count and the work
-the fix implies.
+CI runs on Linux with no Exchange available, so the suite checks structure rather than
+behaviour against a live organisation: that the catalog and the finding schema agree, that the
+collector registry resolves and orders correctly, that **no collector invokes a cmdlet that
+changes state**, that no collector hardcodes a `Compliant` outcome, and that the CSV and JSON
+writers produce what they promise. Verifying the collectors against a real organisation is
+[PORT-PLAN.md](PORT-PLAN.md) phase P3 and is still open.
+
+`PSScriptAnalyzerSettings.psd1` suspends two rules; the file records why each is cosmetic here
+rather than outstanding work.
 
 Package a release artifact:
 

@@ -1,5 +1,10 @@
 <#
-ID.SYNC-01 - AAD Connect synchronization health (local best-effort).
+ID.SYNC-01 - Directory synchronisation health.
+
+Best-effort and local: the ADSync service runs on its own server, which is usually not an
+Exchange server. Where the service is not present on this host, that is reported as
+"not assessed from here" rather than as a failure - the alternative would be to fail every
+organisation whose sync server is elsewhere.
 #>
 
 Set-StrictMode -Version Latest
@@ -11,77 +16,122 @@ function Invoke-ExchCollector_ID_SYNC_01_AADConnectStatus {
     $ErrorActionPreference = 'Stop'
     $control = Get-ExchControlById -ControlId 'ID.SYNC-01'
 
-    $svc = $null
-    $scheduler = $null
+    $maxAgeHours = [int](Get-ExchThreshold -Run $Run -Name 'DirectorySync.MaxSyncAgeHours' -Default 3)
     $errors = New-Object System.Collections.Generic.List[string]
 
-    try { $svc = Get-Service -Name 'ADSync' -ErrorAction Stop }
-    catch { $errors.Add('ADSync service not found or inaccessible: ' + $_.Exception.Message) | Out-Null }
+    $service = $null
+    try { $service = Get-Service -Name 'ADSync' -ErrorAction Stop }
+    catch { $errors.Add("ADSync service not present on $($env:COMPUTERNAME)") | Out-Null }
 
-    try {
-        if (Get-Module -ListAvailable ADSync) {
-            Import-Module ADSync -ErrorAction Stop
-            $scheduler = Get-ADSyncScheduler -ErrorAction Stop
+    $scheduler = $null
+    if ($service) {
+        try {
+            if (Get-Module -ListAvailable -Name ADSync -ErrorAction SilentlyContinue) {
+                Import-Module ADSync -ErrorAction Stop
+                $scheduler = Get-ADSyncScheduler -ErrorAction Stop
+            }
+            else { $errors.Add('ADSync PowerShell module not available') | Out-Null }
         }
-        else {
-            $errors.Add('ADSync module not available on this host.') | Out-Null
-        }
-    }
-    catch {
-        $errors.Add('Get-ADSyncScheduler failed: ' + $_.Exception.Message) | Out-Null
+        catch { $errors.Add("Get-ADSyncScheduler failed: $($_.Exception.Message)") | Out-Null }
     }
 
-    $evidencePath = Write-ExchEvidenceFile -Run $Run -RelativePath 'identity/aad-connect.json' -ContentObject ([ordered]@{
-        service   = $svc
+    $lastSync = $null
+    $syncAgeHours = $null
+    if ($scheduler) {
+        try {
+            if ($scheduler.LastSyncCycleStartTime) {
+                $lastSync = [datetime]$scheduler.LastSyncCycleStartTime
+                $syncAgeHours = [math]::Round(((Get-Date) - $lastSync).TotalHours, 2)
+            }
+        }
+        catch { $errors.Add('LastSyncCycleStartTime unreadable') | Out-Null }
+    }
+
+    $row = [pscustomobject]@{
+        Host                 = [string]$env:COMPUTERNAME
+        ServicePresent       = [bool]$service
+        ServiceStatus        = $(if ($service) { [string]$service.Status } else { 'Not installed' })
+        SyncCycleEnabled     = $(if ($scheduler) { [bool]$scheduler.SyncCycleEnabled } else { '' })
+        StagingModeEnabled   = $(if ($scheduler) { [bool]$scheduler.StagingModeEnabled } else { '' })
+        AllowedSyncCycleInterval = $(if ($scheduler) { [string]$scheduler.AllowedSyncCycleInterval } else { '' })
+        LastSyncCycleStartTime   = $lastSync
+        SyncAgeHours         = $syncAgeHours
+        Notes                = (@($errors.ToArray()) -join '; ')
+    }
+
+    $evidence = Write-ExchEvidenceFile -Run $Run -RelativePath 'identity/aad-connect.json' -ContentObject ([ordered]@{
+        state  = $row
         scheduler = $scheduler
-        errors    = @($errors)
+        errors = @($errors.ToArray())
     })
 
-    $outcome = 'Unknown'
-    $sev = 'Medium'
-    $suff = if ($errors.Count -gt 0) { 'SoftFail' } else { 'Pass' }
-    $rat = 'AAD Connect signals captured (local host).'
+    $sections = @(
+        New-ExchInventorySection -Run $Run -Key 'identity.directory-sync' -Title 'Directory Synchronisation' -Area 'Identity' `
+            -Columns @('Host', 'ServicePresent', 'ServiceStatus', 'SyncCycleEnabled', 'StagingModeEnabled', 'AllowedSyncCycleInterval', 'LastSyncCycleStartTime', 'SyncAgeHours', 'Notes') `
+            -Rows @($row)
+    )
 
-    $recent = $null
-    try {
-        if ($scheduler -and $scheduler.LastSyncTime) {
-            $recent = ((Get-Date) - [datetime]$scheduler.LastSyncTime).TotalHours
-        }
-    } catch { }
+    if (-not $service) {
+        $finding = New-ExchControlFinding -Control $control -Severity 'Info' -Outcome 'Unknown' -Sufficiency 'SoftFail' `
+            -Rationale ("The ADSync service is not installed on {0}, so directory synchronisation health could not be assessed from this host. Entra Connect usually runs on a dedicated server." -f $env:COMPUTERNAME) `
+            -Evidence @($evidence) `
+            -Remediation 'Run this assessment on the Entra Connect server as well, or check synchronisation health from the Entra admin centre. If the organisation is not synchronised to Entra ID, no action is needed.' `
+            -Metrics @{ servicePresent = $false; assessedHost = [string]$env:COMPUTERNAME } `
+            -Meta @{ dataSources = @{ ADSync = @{ state = 'NotPresent'; reason = 'ADSync service not installed on the assessed host' } }; evaluationStatus = 'NotApplicable' }
 
-    if ($svc -and $svc.Status -eq 'Running' -and $null -ne $recent -and $recent -le 2) {
-        $outcome = 'Compliant'
-        $sev = 'Low'
-        $rat = 'ADSync running and recent sync within 2 hours.'
-    }
-    elseif ($svc -and $svc.Status -eq 'Running' -and $null -ne $recent -and $recent -gt 2) {
-        $outcome = 'PartiallyCompliant'
-        $sev = 'Medium'
-        $rat = 'ADSync running but last sync older than 2 hours.'
-    }
-    elseif ($svc -and $svc.Status -ne 'Running') {
-        $outcome = 'NonCompliant'
-        $sev = 'High'
-        $rat = 'ADSync service not running.'
-    }
-    elseif (-not $svc) {
-        $outcome = 'Unknown'
-        $sev = 'High'
-        $rat = 'ADSync service not found on this host (may run elsewhere).'
+        return New-ExchCollectorResult -Sections $sections -Findings @($finding)
     }
 
-    return New-ExchFinding `
-        -ControlDomain $control.domain `
-        -ControlId $control.controlId `
-        -Severity $sev `
-        -Title $control.title `
-        -Description $control.target `
-        -Evidence @($evidencePath) `
-        -Remediation 'Verify AAD Connect is installed, running, and syncing on the designated server; resolve scheduler errors.' `
-        -FrameworkMappings $control.mappings `
-        -Outcome $outcome `
-        -Sufficiency $suff `
-        -Rationale $rat `
-        -Metrics @{ serviceStatus = if($svc){$svc.Status}else{$null}; lastSyncHours=$recent } `
-        -Meta @{ dataSources = @{ AADConnect = @{ state= if($errors.Count -gt 0){'Partial'} else {'Success'} ; reason = if($errors.Count -gt 0){'One or more sync signals missing'} else {''} } }; evaluationStatus = 'Complete' }
+    $problems = New-Object System.Collections.Generic.List[string]
+    $outcomes = New-Object System.Collections.Generic.List[string]
+
+    if ([string]$service.Status -ne 'Running') {
+        $problems.Add(("The ADSync service is {0}, so directory synchronisation has stopped" -f $service.Status)) | Out-Null
+        $outcomes.Add('NonCompliant') | Out-Null
+    }
+    elseif ($null -eq $syncAgeHours) {
+        $problems.Add('The ADSync service is running but the last sync cycle time could not be read') | Out-Null
+        $outcomes.Add('Unknown') | Out-Null
+    }
+    elseif ($syncAgeHours -gt $maxAgeHours) {
+        $problems.Add(("The last synchronisation cycle started {0} hours ago, beyond the {1} hour threshold" -f $syncAgeHours, $maxAgeHours)) | Out-Null
+        $outcomes.Add('NonCompliant') | Out-Null
+    }
+    else {
+        $outcomes.Add('Compliant') | Out-Null
+    }
+
+    if ($scheduler -and -not $scheduler.SyncCycleEnabled) {
+        $problems.Add('The synchronisation cycle is disabled in the scheduler') | Out-Null
+        $outcomes.Add('NonCompliant') | Out-Null
+    }
+    if ($scheduler -and $scheduler.StagingModeEnabled) {
+        $problems.Add('The server is in staging mode, so it is not exporting changes to Entra ID') | Out-Null
+        $outcomes.Add('PartiallyCompliant') | Out-Null
+    }
+
+    $outcome = Get-ExchWorstOutcome -Outcomes $outcomes.ToArray()
+    $severity = switch ($outcome) {
+        'NonCompliant'       { 'High' }
+        'PartiallyCompliant' { 'Medium' }
+        'Unknown'            { 'Medium' }
+        default              { 'Low' }
+    }
+
+    $rationale = if ($problems.Count -gt 0) { ($problems -join '. ') + '.' }
+                 else { ("The ADSync service is running and the last synchronisation cycle started {0} hours ago, within the {1} hour threshold." -f $syncAgeHours, $maxAgeHours) }
+
+    $finding = New-ExchControlFinding -Control $control -Severity $severity -Outcome $outcome `
+        -Rationale $rationale `
+        -Evidence @($evidence) `
+        -Remediation 'Start the ADSync service, re-enable the sync cycle, and investigate any connector run errors so that directory changes reach Entra ID.' `
+        -Metrics @{
+            servicePresent = $true
+            serviceStatus  = [string]$service.Status
+            syncAgeHours   = $syncAgeHours
+            thresholdHours = $maxAgeHours
+        } `
+        -Meta @{ dataSources = @{ ADSync = @{ state = $(if ($errors.Count -gt 0) { 'Partial' } else { 'Success' }); reason = ($errors -join '; ') } }; evaluationStatus = 'Complete' }
+
+    return New-ExchCollectorResult -Sections $sections -Findings @($finding)
 }

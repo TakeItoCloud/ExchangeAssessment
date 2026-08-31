@@ -1,92 +1,157 @@
 <#
-MB.AV-01 - Exchange AV exclusions.
+MB.AV-01 - Exchange anti-malware exclusions.
+
+Reports what is missing, not just what is set. The Microsoft-recommended folder and process
+exclusions live in Config/Thresholds.psd1 and every Exchange server's configured exclusions are
+compared against them.
+
+Only Microsoft Defender is readable this way. A server running third-party anti-malware is
+reported as not assessed rather than as compliant.
 #>
 
 Set-StrictMode -Version Latest
 
 function Invoke-ExchCollector_MB_AV_01_AVExclusions {
-    # $recommendedTokens records the Microsoft-recommended exclusion paths, but nothing
-    # compares the collected exclusions against them yet - the collector reports what is
-    # configured, not what is missing. Kept as the specification for that check. PORT-PLAN P4.
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'recommendedTokens')]
     [CmdletBinding()]
     param([Parameter(Mandatory)][ValidateNotNull()]$Run)
 
     $ErrorActionPreference = 'Stop'
     $control = Get-ExchControlById -ControlId 'MB.AV-01'
 
-    $servers = @()
-    try { $servers = Get-ExchangeServer -ErrorAction Stop }
+    try { $servers = @(Get-ExchangeServer -ErrorAction Stop) }
     catch {
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'Get-ExchangeServer failed for AV exclusions' -Data @{ error=$_.Exception.Message }
-        return New-ExchFinding -ControlDomain $control.domain -ControlId $control.controlId -Severity 'High' -Title $control.title -Description $control.target -Evidence @() -Remediation 'Run from EMS with rights to enumerate Exchange servers.' -FrameworkMappings $control.mappings -Outcome 'Unknown' -Sufficiency 'HardFail' -Rationale 'Unable to enumerate Exchange servers for AV exclusions.' -Metrics @{ error=$_.Exception.Message } -Meta @{ dataSources = @{ Exchange = @{ state='Error'; reason=$_.Exception.Message } }; evaluationStatus = 'Partial' }
+        $reason = "Get-ExchangeServer failed, so anti-malware exclusions could not be assessed: $($_.Exception.Message)"
+        return New-ExchCollectorResult -Findings @(
+            New-ExchUnavailableFinding -Control $control -Reason $reason `
+                -Remediation 'Run from an Exchange Management Shell with rights to enumerate servers.'
+        )
     }
 
-    $records = New-Object System.Collections.Generic.List[object]
-    $recommendedTokens = @('Microsoft\\Exchange Server', 'TransportRoles', 'ClientAccess')
+    $requiredPaths     = @(Get-ExchThreshold -Run $Run -Name 'AntiVirus.RequiredPathTokens'    -Default @())
+    $requiredProcesses = @(Get-ExchThreshold -Run $Run -Name 'AntiVirus.RequiredProcessTokens' -Default @())
 
-    foreach ($srv in @($servers)) {
-        $result = $null
-        $status = 'Success'
-        $reason = ''
+    $serverRows = New-Object System.Collections.Generic.List[object]
+    $gapRows    = New-Object System.Collections.Generic.List[object]
+
+    foreach ($srv in $servers) {
+        $name = [string]$srv.Name
         try {
-            $sb = { try { Get-MpPreference } catch { $null } }
-            $mp = Invoke-Command -ComputerName $srv.Name -ScriptBlock $sb -ErrorAction Stop
-            $result = $mp
-            if (-not $mp) { $status = 'Missing'; $reason = 'Get-MpPreference returned null (Defender not available?)' }
+            $preference = Invoke-Command -ComputerName $name -ScriptBlock { Get-MpPreference } -ErrorAction Stop
+            $paths     = @($preference.ExclusionPath)
+            $processes = @($preference.ExclusionProcess)
+
+            $missingPaths     = @($requiredPaths     | Where-Object { -not (Test-ExchExclusionCovered -Token $_ -Configured $paths) })
+            $missingProcesses = @($requiredProcesses | Where-Object { -not (Test-ExchExclusionCovered -Token $_ -Configured $processes) })
+
+            $serverRows.Add([pscustomobject]@{
+                Server           = $name
+                Status           = 'Assessed'
+                ExclusionPaths   = (ConvertTo-ExchFlatValue -Value $paths)
+                ExclusionProcesses = (ConvertTo-ExchFlatValue -Value $processes)
+                PathCount        = $paths.Count
+                ProcessCount     = $processes.Count
+                MissingPathCount = $missingPaths.Count
+                MissingProcessCount = $missingProcesses.Count
+                Reason           = ''
+            }) | Out-Null
+
+            foreach ($missing in $missingPaths) {
+                $gapRows.Add([pscustomobject]@{ Server = $name; Kind = 'Path'; Missing = $missing }) | Out-Null
+            }
+            foreach ($missing in $missingProcesses) {
+                $gapRows.Add([pscustomobject]@{ Server = $name; Kind = 'Process'; Missing = $missing }) | Out-Null
+            }
         }
         catch {
-            $status = 'Error'
-            $reason = $_.Exception.Message
+            $serverRows.Add([pscustomobject]@{
+                Server = $name; Status = 'Not assessed'; ExclusionPaths = ''; ExclusionProcesses = ''
+                PathCount = 0; ProcessCount = 0; MissingPathCount = 0; MissingProcessCount = 0
+                Reason = [string]$_.Exception.Message
+            }) | Out-Null
         }
-
-        $records.Add([pscustomobject]@{
-            server         = $srv.Name
-            status         = $status
-            reason         = $reason
-            exclusionPaths = if ($result) { $result.ExclusionPath } else { @() }
-            exclusionProc  = if ($result) { $result.ExclusionProcess } else { @() }
-        }) | Out-Null
     }
 
-    $evidencePath = Write-ExchEvidenceFile -Run $Run -RelativePath 'security/av-exclusions.json' -ContentObject $records
+    $serverArr = @($serverRows.ToArray())
+    $gapArr    = @($gapRows.ToArray())
 
-    $missingData = @($records | Where-Object { $_.status -ne 'Success' })
-    $noExchExclusions = @($records | Where-Object { ($_.exclusionPaths + $_.exclusionProc) -notmatch 'Exchange' })
+    $evidence = Write-ExchEvidenceFile -Run $Run -RelativePath 'security/av-exclusions.json' -ContentObject ([ordered]@{
+        servers           = $serverArr
+        gaps              = $gapArr
+        requiredPaths     = $requiredPaths
+        requiredProcesses = $requiredProcesses
+    })
 
-    $outcome = 'Compliant'
-    $sev = 'Medium'
-    $suff = if ($missingData.Count -gt 0) { 'SoftFail' } else { 'Pass' }
-    $rat = 'Defender exclusions collected; Exchange-related exclusions present.'
+    $sections = @(
+        New-ExchInventorySection -Run $Run -Key 'security.av-exclusions' -Title 'Anti-Malware Exclusions by Server' -Area 'Mailbox' `
+            -Columns @('Server', 'Status', 'PathCount', 'ProcessCount', 'MissingPathCount', 'MissingProcessCount', 'ExclusionPaths', 'ExclusionProcesses', 'Reason') `
+            -Rows $serverArr
 
-    if ($records.Count -eq 0) {
-        $outcome = 'Unknown'
-        $sev = 'High'
-        $suff = 'HardFail'
-        $rat = 'No Exchange servers inspected for AV exclusions.'
+        New-ExchInventorySection -Run $Run -Key 'security.av-exclusion-gaps' -Title 'Missing Anti-Malware Exclusions' -Area 'Mailbox' `
+            -Columns @('Server', 'Kind', 'Missing') `
+            -Rows $gapArr
+    )
+
+    $assessed    = @($serverArr | Where-Object { $_.Status -eq 'Assessed' })
+    $notAssessed = @($serverArr | Where-Object { $_.Status -ne 'Assessed' })
+    $withGaps    = @($assessed | Where-Object { $_.MissingPathCount -gt 0 -or $_.MissingProcessCount -gt 0 })
+
+    $problems = New-Object System.Collections.Generic.List[string]
+    $outcomes = New-Object System.Collections.Generic.List[string]
+
+    if ($withGaps.Count -gt 0) {
+        $problems.Add(("{0} of {1} assessed servers are missing recommended exclusions ({2} gaps in total): {3}" -f `
+            $withGaps.Count, $assessed.Count, $gapArr.Count, `
+            (($withGaps | ForEach-Object { "$($_.Server) missing $($_.MissingPathCount) paths and $($_.MissingProcessCount) processes" }) -join ', '))) | Out-Null
+        $outcomes.Add('NonCompliant') | Out-Null
     }
-    elseif ($noExchExclusions.Count -gt 0) {
-        $outcome = 'PartiallyCompliant'
-        $sev = 'High'
-        $rat = 'One or more servers missing Exchange-related AV exclusions.'
+    if ($notAssessed.Count -gt 0) {
+        $problems.Add(("{0} servers could not be assessed, so their exclusions are unknown: {1}" -f $notAssessed.Count, `
+            (($notAssessed | ForEach-Object { "$($_.Server) - $($_.Reason)" }) -join '; '))) | Out-Null
+        $outcomes.Add('Unknown') | Out-Null
     }
-    elseif ($missingData.Count -gt 0) {
-        $outcome = 'PartiallyCompliant'
-        $rat = 'Some servers did not return Defender preferences.'
+    if ($assessed.Count -gt 0 -and $withGaps.Count -eq 0) { $outcomes.Add('Compliant') | Out-Null }
+
+    $outcome = Get-ExchWorstOutcome -Outcomes $outcomes.ToArray()
+    $severity = switch ($outcome) {
+        'NonCompliant' { 'High' }
+        'Unknown'      { 'Medium' }
+        default        { 'Low' }
     }
 
-    return New-ExchFinding `
-        -ControlDomain $control.domain `
-        -ControlId $control.controlId `
-        -Severity $sev `
-        -Title $control.title `
-        -Description $control.target `
-        -Evidence @($evidencePath) `
-        -Remediation 'Configure required Exchange AV exclusions on all servers (processes and paths); ensure Defender/AV reporting is available.' `
-        -FrameworkMappings $control.mappings `
-        -Outcome $outcome `
-        -Sufficiency $suff `
-        -Rationale $rat `
-        -Metrics @{ servers=$records.Count; missingData=$missingData.Count; missingExchangeExclusions=$noExchExclusions.Count } `
-        -Meta @{ dataSources = @{ WinRM = @{ state= if($missingData.Count -gt 0){'Partial'} else {'Success'} ; reason = if($missingData.Count -gt 0){'Some servers unavailable'} else {''} } }; evaluationStatus = 'Complete' }
+    $rationale = if ($problems.Count -gt 0) { ($problems -join '. ') + '.' }
+                 else { ("All {0} servers have every recommended folder and process exclusion configured." -f $assessed.Count) }
+
+    $finding = New-ExchControlFinding -Control $control -Severity $severity -Outcome $outcome `
+        -Sufficiency $(if ($notAssessed.Count -gt 0) { 'SoftFail' } else { 'Pass' }) `
+        -Rationale $rationale `
+        -Evidence @($evidence) `
+        -Remediation 'Apply the Microsoft-recommended Exchange folder and process exclusions on every Exchange server. Where a third-party anti-malware product is in use, apply the equivalent exclusions in that product and confirm them manually.' `
+        -Metrics @{
+            serverCount    = $serverArr.Count
+            assessedCount  = $assessed.Count
+            serversWithGaps= $withGaps.Count
+            totalGaps      = $gapArr.Count
+            notAssessed    = $notAssessed.Count
+        } `
+        -Meta @{ dataSources = @{ Defender = @{ state = $(if ($notAssessed.Count -gt 0) { 'Partial' } else { 'Success' }); reason = $(if ($notAssessed.Count -gt 0) { 'Some servers unreachable or not running Microsoft Defender' } else { '' }) } }; evaluationStatus = 'Complete' }
+
+    return New-ExchCollectorResult -Sections $sections -Findings @($finding)
+}
+
+function Test-ExchExclusionCovered {
+    <#
+    True when a configured exclusion covers the required token. Exclusions are compared
+    case-insensitively as substrings, because installation paths differ per server.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Token,
+        [Parameter()][string[]]$Configured = @()
+    )
+
+    foreach ($entry in @($Configured)) {
+        if (-not $entry) { continue }
+        if ($entry -like ("*{0}*" -f $Token)) { return $true }
+    }
+    return $false
 }
