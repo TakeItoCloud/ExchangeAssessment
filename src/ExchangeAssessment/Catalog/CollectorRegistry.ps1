@@ -34,6 +34,9 @@ function Get-ExchCollectorRegistry {
         @{ Id='LOG.EX-01';   Function='Invoke-ExchCollector_LOG_EX_01_EventLogErrors';       Area='Monitoring';  Requires=@();                                     Cloud=$false; SkipFlag='' }
         @{ Id='EX.ADM-01';   Function='Invoke-ExchCollector_EX_ADM_01_AcceptedDomains';      Area='Exchange';    Requires=@();                                     Cloud=$false; SkipFlag='' }
         @{ Id='EX.VDIR-01';  Function='Invoke-ExchCollector_EX_VDIR_01_VirtualDirectories';  Area='Exchange';    Requires=@();                                     Cloud=$false; SkipFlag='' }
+        @{ Id='SRV-01';      Function='Invoke-ExchCollector_SRV_01_ServerInventory';        Area='Environment'; Requires=@();                                     Cloud=$false; SkipFlag='' }
+        @{ Id='TR.CFG-01';   Function='Invoke-ExchCollector_TR_CFG_01_TransportConfig';     Area='Transport';   Requires=@();                                     Cloud=$false; SkipFlag='' }
+        @{ Id='REPL-01';     Function='Invoke-ExchCollector_REPL_01_ReplicationHealth';     Area='Mailbox';     Requires=@();                                     Cloud=$false; SkipFlag='' }
     )
 }
 

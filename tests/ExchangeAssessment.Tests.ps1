@@ -149,15 +149,20 @@ Describe 'ExchangeAssessment' {
             # Set-StrictMode changes the parser's behaviour for the current scope, not the
             # environment being assessed.
             $allowed = @('Set-StrictMode')
-            $pattern = '\b(?<cmd>(' + ($forbiddenVerbs -join '|') + ')-\w+)'
 
+            # Walk the AST rather than the text: a cmdlet named in a comment or a message string
+            # is not a call, and this test should only ever fail on a real invocation.
             $violations = foreach ($file in Get-ChildItem -Path $script:CollectorRoot -Filter '*.ps1') {
-                $text = Get-Content -Path $file.FullName -Raw
-                foreach ($match in [regex]::Matches($text, $pattern)) {
-                    $cmd = $match.Groups['cmd'].Value
-                    if ($cmd -notin $allowed) { "$($file.Name): $cmd" }
+                $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$null)
+                $commands = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true)
+
+                foreach ($command in $commands) {
+                    $name = $command.GetCommandName()
+                    if (-not $name -or $name -in $allowed) { continue }
+                    if ($name -eq 'Test-Mailflow') { "$($file.Name): Test-Mailflow sends live probe messages"; continue }
+                    $verb = ($name -split '-')[0]
+                    if ($verb -in $forbiddenVerbs) { "$($file.Name): $name" }
                 }
-                if ($text -match '\bTest-Mailflow\b') { "$($file.Name): Test-Mailflow" }
             }
 
             $violations | Should -BeNullOrEmpty -Because "collectors must be read-only, but these were found: $($violations -join '; ')"

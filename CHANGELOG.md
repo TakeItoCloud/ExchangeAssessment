@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-09-01 (phase P10, partial)
+
+Three collectors, closing the coverage gaps that were named explicitly: transport settings,
+replication, and a real server inventory.
+
+- **`SRV-01` — server inventory and service health.** How many Exchange servers there are,
+  what roles they hold, which Active Directory site each sits in, whether `Test-ServiceHealth`
+  reports every required service running, and whether any server component has been left
+  Inactive. The organisation previously called `Get-ExchangeServer` three times and kept only
+  the name, edition and version.
+- **`TR.CFG-01` — transport configuration.** Organisation-wide limits, shadow redundancy and
+  Safety Net hold time, per-server transport and frontend transport services including message
+  tracking, and the transport and journal rules that redirect or copy mail. Transport settings
+  were previously absent entirely.
+- **`REPL-01` — replication and client connectivity.** `Test-ReplicationHealth` on every DAG
+  member and `Test-MAPIConnectivity` against every mounted database. `Test-Mailflow` is
+  deliberately not used: it sends live messages, and this assessment stays read-only.
+
+The read-only test now walks the PowerShell AST rather than the file text, so a cmdlet named
+in a comment or a message string is no longer mistaken for a call, and a real invocation of a
+state-changing cmdlet is caught wherever it appears.
+
+### Fixed — 2026-09-01
+
+- Two boolean checks compared against the strings `'True'` and `'False'`. PowerShell coerces
+  the right operand of `-eq` to the left operand's type and every non-empty string is a true
+  boolean, so the message-tracking check reported exactly the servers that were fine and
+  ignored the ones that were not.
+
 ### Changed — 2026-08-31 (phase P9)
 
 The assessment is reworked around a configuration inventory that is separate from the

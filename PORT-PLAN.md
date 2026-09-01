@@ -22,7 +22,7 @@ evaluate" from "passed", and the analyzer suspensions below are gone.
 | P7 | Operational documentation output | Superseded by P9 | 2026-08-31 |
 | P8 | Packaging and first tagged release | Planned | |
 | P9 | Inventory model, threshold configuration, CSV and JSON reporting | Done | 2026-08-31 |
-| P10 | Full-environment collector coverage (see *P10 scope*) | Planned | |
+| P10 | Full-environment collector coverage (see *P10 scope*) | Partly done | 2026-09-01 |
 | P11 | Exchange Online collection for the tenant side of a hybrid organisation | Planned | |
 
 ## The 5.1 constraint
@@ -112,14 +112,13 @@ this uncovered.
 
 ### P10 scope — full-environment coverage
 
-The 15 controls cover roughly 40% of an Exchange organisation. Still absent, in rough priority
-order:
+Three of the named gaps are closed: `SRV-01` (server inventory, roles, AD sites, service
+health, component states), `TR.CFG-01` (organisation and per-server transport configuration,
+transport and journal rules) and `REPL-01` (`Test-ReplicationHealth`, `Test-MAPIConnectivity`).
 
-- **Server inventory** — roles, AD sites, `Get-ServerComponentState`, `Test-ServiceHealth`,
-  `Get-HealthReport`
-- **Transport configuration** — `Get-TransportConfig`, `Get-TransportService`,
-  `Get-FrontendTransportService`, transport and journal rules, queues
-- **Replication health** — `Test-ReplicationHealth`, `Test-MAPIConnectivity`
+Still absent, in rough priority order:
+
+- **Transport queues** — `Get-Queue`, `Get-Message`, queue age and depth
 - **RBAC** — role groups, management role assignments, management scopes
 - **Mailboxes** — inventory, quotas, archives, litigation hold
 - **Retention and compliance** — retention policies and tags, audit configuration
@@ -142,6 +141,21 @@ authentication, plus collectors for EXO organisation configuration and accepted 
 connectors, anti-spam and Defender policies, and migration endpoints. Cloud collectors are
 already modelled in the registry (`Cloud = $true`) and are skipped unless the switch is given.
 No credential may be written to the run folder.
+
+### P3 note — property availability across versions
+
+Collectors read Exchange object properties directly, and `Set-StrictMode -Version Latest`
+makes a missing property throw. On a version that does not expose one, the dispatcher turns
+that into an `Unknown`/`HardFail` finding naming the error rather than losing the control, so
+the failure is visible — but it costs the whole control. Shaking this out is part of P3: run
+against each Exchange version in scope and replace any property that turns out to vary with a
+guarded read.
+
+### Cosmetic backlog
+
+Rationale text builds count phrases with a bare format placeholder, so a count of one reads
+"1 servers are..." rather than "1 server is...". Cosmetic only; the counts and the named
+objects are correct.
 
 ## Rules
 

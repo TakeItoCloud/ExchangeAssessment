@@ -6,9 +6,10 @@ ExchangeAssessment reads an on-premises or hybrid Exchange organisation and repo
 the **configuration** it found, and the **problems** in that configuration. It is read-only —
 every collector reads, and the only writes are into the local run folder.
 
-A run drives 15 collectors across environment, Exchange version, databases, DAG, transport,
-certificates, anti-malware, hybrid, identity sync, accepted domains, virtual directories and
-event logs, then writes:
+A run drives 18 collectors across environment and server inventory, Exchange version,
+databases, DAG and replication, transport configuration and connectors, certificates,
+anti-malware, hybrid, identity sync, accepted domains, virtual directories and event logs,
+then writes:
 
 - **`csv/`** — one CSV per configuration area, plus `csv/findings.csv`. The complete record.
 - **`assessment.json`** — the whole assessment in one file: configuration inventory, findings
@@ -23,13 +24,16 @@ Extracted from `infra-scripting-suite/powershell/Assessments/ExchangeAssessment`
 
 | Control | Covers |
 | --- | --- |
+| `SRV-01` | Server inventory: roles, AD site, required services, server component states |
 | `ENV.VERS-01` | Forest and domain functional levels; Exchange AD preparation (`rangeUpper`, both `objectVersion` values) |
 | `ENV.OS-01` | Server operating system supportability, uptime, free disk |
 | `EX.CH-01` | Exchange product version, support state, and build currency against a dated build table |
 | `UPG-01` | Exchange Server SE readiness, rolled up from the three above |
 | `MB.DB-01` | Database configuration (paths, size, quotas, retention, circular logging, backups) and copy health |
 | `DAG-01` | DAG membership, witness and quorum, replication networks |
+| `REPL-01` | `Test-ReplicationHealth` per DAG member and MAPI connectivity per mounted database |
 | `TR.CO-01` | Send and receive connectors: open relay, TLS, authentication, size limits |
+| `TR.CFG-01` | Organisation transport config, shadow redundancy, Safety Net, per-server transport, transport and journal rules |
 | `CERT-01` | Certificate expiry, key size, signature algorithm, service bindings, self-signed |
 | `MB.AV-01` | Anti-malware exclusions, reported as what is **missing** per server |
 | `AA.SPAM-01` | Malware agent and anti-spam filter posture |

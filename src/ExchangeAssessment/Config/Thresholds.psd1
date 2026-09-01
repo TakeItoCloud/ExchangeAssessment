@@ -151,6 +151,36 @@ statement it says so.
         QueueLengthWarning        = 100
         QueueLengthCritical       = 500
         MaxQueueAgeHours          = 4
+        # Organisation transport configuration. Shadow redundancy and Safety Net protect
+        # in-flight mail across a transport failure; both are on by default and turning them
+        # off is a deliberate, and usually regrettable, choice.
+        RequireShadowRedundancy   = $true
+        RequireSafetyNet          = $true
+        MinSafetyNetHoldTimeHours = 2
+        # An organisation-wide limit far above what the connectors allow is misleading rather
+        # than harmful, so this is reported for review rather than failed.
+        ReviewMaxReceiveSizeMB    = 150
+    }
+
+    # --------------------------------------------------------------------------------------
+    # Server inventory and service health
+    # https://learn.microsoft.com/exchange/plan-and-deploy/deployment-ref/services-overview
+    # --------------------------------------------------------------------------------------
+    Server = @{
+        # Component states that mean a server is deliberately out of service. Reported, and
+        # failed only when the operator has not also put the server into maintenance.
+        ActiveComponentState = 'Active'
+        IgnoredComponents    = @('ForwardSyncDaemon', 'ProvisioningRps')
+    }
+
+    # --------------------------------------------------------------------------------------
+    # Replication
+    # https://learn.microsoft.com/powershell/module/exchange/test-replicationhealth
+    # --------------------------------------------------------------------------------------
+    Replication = @{
+        PassingResults = @('Passed')
+        # Checks that are informational on a healthy single-copy database.
+        IgnoredChecks  = @()
     }
 
     # --------------------------------------------------------------------------------------

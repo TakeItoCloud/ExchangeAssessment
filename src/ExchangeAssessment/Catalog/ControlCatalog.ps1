@@ -203,6 +203,49 @@ function Get-ExchControlCatalog {
             )
         },
         @{
+            controlId  = 'SRV-01'
+            domain     = 'Environment'
+            title      = 'Exchange server inventory and service health'
+            target     = 'Every Exchange server is inventoried with its roles and site, all required services are running, and no server component is left inactive.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.5.9'; note='Inventory of information and other associated assets' }
+                @{ framework='CISv8'; ref='2.1'; note='Establish and maintain a software inventory' }
+            )
+            references = @(
+                @{ title='Get-ExchangeServer'; url='https://learn.microsoft.com/powershell/module/exchange/get-exchangeserver' }
+                @{ title='Server component states in Exchange Server'; url='https://learn.microsoft.com/exchange/high-availability/manage-ha/server-component-states' }
+            )
+        },
+        @{
+            controlId  = 'TR.CFG-01'
+            domain     = 'Transport'
+            title      = 'Organisation and server transport configuration'
+            target     = 'Organisation-wide transport limits, safety-net and shadow redundancy settings, per-server transport configuration, and transport and journal rules are inventoried and sane.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.8.9'; note='Configuration management' }
+                @{ framework='CISv8'; ref='4.1'; note='Secure configuration process' }
+            )
+            references = @(
+                @{ title='Get-TransportConfig'; url='https://learn.microsoft.com/powershell/module/exchange/get-transportconfig' }
+                @{ title='Shadow redundancy in Exchange Server'; url='https://learn.microsoft.com/exchange/mail-flow/transport-high-availability/shadow-redundancy' }
+                @{ title='Safety Net in Exchange Server'; url='https://learn.microsoft.com/exchange/mail-flow/transport-high-availability/safety-net' }
+            )
+        },
+        @{
+            controlId  = 'REPL-01'
+            domain     = 'Mailbox'
+            title      = 'Mailbox replication and client connectivity health'
+            target     = 'Test-ReplicationHealth passes on every DAG member and mailbox databases answer MAPI connectivity checks.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.8.14'; note='Redundancy of information processing facilities' }
+                @{ framework='NIS2'; ref='Business continuity'; note='Replication underpins mailbox availability' }
+            )
+            references = @(
+                @{ title='Test-ReplicationHealth'; url='https://learn.microsoft.com/powershell/module/exchange/test-replicationhealth' }
+                @{ title='Test-MAPIConnectivity'; url='https://learn.microsoft.com/powershell/module/exchange/test-mapiconnectivity' }
+            )
+        },
+        @{
             controlId  = 'EX.VDIR-01'
             domain     = 'Exchange'
             title      = 'Virtual directories configuration'
