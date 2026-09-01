@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-09-01 (phase P11)
+
+Exchange Online collection for the tenant side of a hybrid organisation, off unless
+`-IncludeExchangeOnline` is given. Coverage is now 32 controls.
+
+- **`CLD.ORG-01`** tenant organisation configuration and accepted domains, including modern
+  authentication and tenant-wide mailbox auditing.
+- **`CLD.CONN-01`** inbound and outbound connectors and transport rules. An inbound connector
+  that accepts mail from any address without requiring TLS or a matching certificate is the
+  cloud equivalent of an open relay and is what this control mainly looks for.
+- **`CLD.SEC-01`** anti-spam, anti-malware and anti-phishing policies, Safe Links and Safe
+  Attachments, and DKIM signing. A tenant where every policy is still the built-in default is
+  reported as untailored rather than as configured. Safe Links and Safe Attachments being absent
+  is reported as "not licensed or not configured", because the Exchange Online session cannot
+  tell those two apart.
+- **`CLD.MIG-01`** migration endpoints, batches and move requests, including batches left failed
+  or open past the configured age.
+
+`Connect-ExchOnlineSession` supports interactive, app-only certificate and managed identity
+authentication. A missing module or failed connection makes each cloud control report `Unknown`
+with the reason; it never drops the control silently, and it never stops the on-premises
+assessment.
+
+**Prefix isolation.** Exchange Online and on-premises Exchange share cmdlet names, and this
+module normally runs inside the Exchange Management Shell where those names are already bound to
+the on-premises organisation. The tenant session is therefore always imported with a command
+prefix (`Cloud` by default, configurable), and cloud collectors read tenant data only through
+`Invoke-ExchCloudQuery`, which resolves the prefixed name and deliberately will not fall back to
+the unprefixed one - answering a cloud question with on-premises data would be worse than
+answering it with nothing. A test walks the syntax tree of every `CLD.*` collector and fails the
+build on any direct Exchange cmdlet call.
+
+### Fixed — 2026-09-01
+
+- **The run transcript leaked sign-in identifiers.** `Start-Transcript` records the command line
+  that launched the run, so an operator passing `-CloudAppId` and
+  `-CloudCertificateThumbprint` had them written into `logs/transcript.txt`, which is hashed,
+  zipped and handed to the client. `Protect-ExchRunTranscript` now redacts the app id,
+  certificate thumbprint, user principal name and managed identity account id from the
+  transcript before the hash manifest is written, so the manifest covers the redacted file. The
+  tenant name is kept: the report needs to say which organisation was assessed. If the
+  transcript cannot be rewritten the run warns loudly rather than shipping it quietly.
+
 ### Added — 2026-09-01 (phase P10, complete)
 
 Ten collectors, taking coverage to 28 controls across the whole organisation.

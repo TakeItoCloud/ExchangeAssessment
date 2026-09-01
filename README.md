@@ -6,10 +6,11 @@ ExchangeAssessment reads an on-premises or hybrid Exchange organisation and repo
 the **configuration** it found, and the **problems** in that configuration. It is read-only —
 every collector reads, and the only writes are into the local run folder.
 
-A run drives 28 collectors across the whole organisation - servers, Active Directory, Exchange
+A run drives 32 collectors across the whole organisation - servers, Active Directory, Exchange
 version and patch state, databases, DAG and replication, transport configuration, connectors and
 queues, certificates, TLS, anti-malware, RBAC, mailboxes, retention and audit, client access,
-public folders, address lists, hybrid, identity sync, DNS posture and event logs - then writes:
+public folders, address lists, hybrid, identity sync, DNS posture and event logs - plus, on
+request, the Exchange Online side of a hybrid organisation. It then writes:
 
 - **`csv/`** — one CSV per configuration area, plus `csv/findings.csv`. The complete record.
 - **`assessment.json`** — the whole assessment in one file: configuration inventory, findings
@@ -52,6 +53,15 @@ Extracted from `infra-scripting-suite/powershell/Assessments/ExchangeAssessment`
 | `TLS-01` | SCHANNEL protocol state, .NET strong cryptography, serialised data signing |
 | `PTCH-01` | Security update currency, Emergency Mitigation Service, Windows patch cycle |
 | `DNS-01` | MX, SPF and DMARC for every authoritative accepted domain |
+
+Four more run only with `-IncludeExchangeOnline`:
+
+| Control | Covers |
+| --- | --- |
+| `CLD.ORG-01` | Tenant organisation config, modern authentication, accepted domains |
+| `CLD.CONN-01` | Inbound and outbound connectors, TLS enforcement, transport rules |
+| `CLD.SEC-01` | Anti-spam, anti-malware, anti-phishing, Safe Links/Attachments, DKIM |
+| `CLD.MIG-01` | Migration endpoints, batches and move requests |
 
 Every finding states an outcome **and** the reasoning that produced it. A control that could
 not be evaluated reports `Unknown` with the reason, never a silent pass.
@@ -111,6 +121,15 @@ Import-Module .\src\ExchangeAssessment\ExchangeAssessment.psd1 -Force
 # Skip the external DNS lookups, for an assessment that must not leave the network
 .\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -SkipDnsQueries
 
+# Include the Exchange Online side of a hybrid organisation, signing in interactively
+.\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -IncludeExchangeOnline `
+    -CloudUserPrincipalName admin@contoso.onmicrosoft.com
+
+# ...or unattended, with app-only certificate authentication
+.\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -IncludeExchangeOnline `
+    -CloudAppId <app id> -CloudCertificateThumbprint <thumbprint> `
+    -CloudOrganization contoso.onmicrosoft.com
+
 # Put every inventory row in assessment.json instead of summarising the large sections
 .\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -FullInventory
 
@@ -137,6 +156,35 @@ The script returns a summary object carrying `FindingsCount`, `SectionCount`, `C
 ```
 
 Run output contains real environment data and is gitignored — never commit it.
+
+### Exchange Online
+
+Cloud collection is off unless `-IncludeExchangeOnline` is given, and needs the
+[`ExchangeOnlineManagement`](https://learn.microsoft.com/powershell/exchange/exchange-online-powershell-v2)
+module. Interactive sign-in needs only `-CloudUserPrincipalName`; unattended runs use app-only
+certificate authentication (`-CloudAppId`, `-CloudCertificateThumbprint`, `-CloudOrganization`)
+or `-CloudManagedIdentity` on an Azure-hosted host.
+
+Two things are worth knowing about how this is done.
+
+**The tenant session is always imported with a command prefix** (`Cloud` by default, configurable
+as `Cloud.CommandPrefix`). Exchange Online and on-premises Exchange share cmdlet names -
+`Get-AcceptedDomain`, `Get-OrganizationConfig`, `Get-MigrationEndpoint` and many more. This module
+normally runs inside the Exchange Management Shell, where those names already belong to the
+on-premises organisation. Importing the tenant cmdlets unprefixed would shadow them and a cloud
+collector would report on-premises data as though it came from the tenant. Cloud collectors
+therefore read tenant data only through a helper that resolves the prefixed name and refuses to
+fall back to the unprefixed one, and a test fails the build if one of them calls an Exchange
+cmdlet directly.
+
+**No credential reaches the run folder.** Only the authentication mode and the organisation are
+recorded. `Start-Transcript` captures the command line that launched the run, so the transcript is
+redacted before the hash manifest is written - an app id, certificate thumbprint, UPN or managed
+identity account id becomes `[redacted]`, while the tenant name is kept because the report needs
+it.
+
+If the module is missing or the connection fails, each cloud control reports `Unknown` with the
+reason rather than being silently dropped.
 
 ### Tuning it per client
 

@@ -396,6 +396,60 @@ function Get-ExchControlCatalog {
                 @{ title='Use DMARC to validate email'; url='https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure' }
             )
         }
+        @{
+            controlId  = 'CLD.ORG-01'
+            domain     = 'Cloud'
+            title      = 'Exchange Online organisation configuration'
+            target     = 'The tenant organisation configuration and accepted domains are inventoried, modern authentication is on, and no domain is left unverified.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.5.9'; note='Inventory of information and associated assets' }
+                @{ framework='ISO27001:2022'; ref='A.8.5'; note='Secure authentication' }
+            )
+            references = @(
+                @{ title='Get-OrganizationConfig (Exchange Online)'; url='https://learn.microsoft.com/powershell/module/exchangepowershell/get-organizationconfig' }
+                @{ title='Manage accepted domains in Exchange Online'; url='https://learn.microsoft.com/exchange/mail-flow-best-practices/manage-accepted-domains/manage-accepted-domains' }
+            )
+        },
+        @{
+            controlId  = 'CLD.CONN-01'
+            domain     = 'Cloud'
+            title      = 'Exchange Online mail flow connectors'
+            target     = 'Inbound and outbound connectors are scoped and require TLS, and no connector accepts mail from anywhere without validation.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.5.7'; note='Threat protection (mail flow)' }
+                @{ framework='CISv8'; ref='9.2'; note='Email protections' }
+            )
+            references = @(
+                @{ title='Configure mail flow using connectors in Exchange Online'; url='https://learn.microsoft.com/exchange/mail-flow-best-practices/use-connectors-to-configure-mail-flow/use-connectors-to-configure-mail-flow' }
+            )
+        },
+        @{
+            controlId  = 'CLD.SEC-01'
+            domain     = 'Cloud'
+            title      = 'Exchange Online mail hygiene and Defender policies'
+            target     = 'Anti-spam, anti-malware and anti-phishing policies exist and are tightened from their defaults, and Safe Links and Safe Attachments are in place where licensed.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.8.7'; note='Protection against malware' }
+                @{ framework='CISv8'; ref='9.7'; note='Deploy and maintain email anti-malware protections' }
+            )
+            references = @(
+                @{ title='Recommended settings for EOP and Defender for Office 365 security'; url='https://learn.microsoft.com/defender-office-365/recommended-settings-for-eop-and-office365' }
+                @{ title='Anti-phishing policies in Microsoft 365'; url='https://learn.microsoft.com/defender-office-365/anti-phishing-policies-about' }
+            )
+        },
+        @{
+            controlId  = 'CLD.MIG-01'
+            domain     = 'Cloud'
+            title      = 'Exchange Online migration endpoints and batches'
+            target     = 'Migration endpoints are configured for the hybrid move path and no migration batch is left failed or stalled.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.5.30'; note='ICT readiness for business continuity' }
+            )
+            references = @(
+                @{ title='Migration endpoints in Exchange Online'; url='https://learn.microsoft.com/powershell/module/exchangepowershell/get-migrationendpoint' }
+                @{ title='Move mailboxes between on-premises and Exchange Online'; url='https://learn.microsoft.com/exchange/hybrid-deployment/move-mailboxes' }
+            )
+        }
     )
 
     return $controls

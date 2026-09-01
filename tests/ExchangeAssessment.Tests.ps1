@@ -169,6 +169,97 @@ Describe 'ExchangeAssessment' {
         }
     }
 
+    Context 'Exchange Online isolation' {
+
+        BeforeAll { Import-Module -Name $script:ManifestPath -Force -ErrorAction Stop }
+
+        # Exchange Online and on-premises Exchange share cmdlet names. This module usually runs
+        # inside the Exchange Management Shell, where those names are bound to the on-premises
+        # organisation, so a cloud collector calling Get-AcceptedDomain directly would report
+        # on-premises data as tenant data. Cloud collectors must go through Invoke-ExchCloudQuery,
+        # which resolves the prefixed name.
+        It 'reaches tenant data only through the prefixed cloud query helper' {
+            $builtIns = @(
+                'ForEach-Object', 'Where-Object', 'Select-Object', 'Sort-Object', 'Group-Object',
+                'Measure-Object', 'New-Object', 'Out-Null', 'Set-StrictMode', 'Get-Date',
+                'Join-Path', 'Split-Path', 'Write-Verbose', 'Write-Warning', 'Get-Command'
+            )
+
+            $violations = foreach ($file in Get-ChildItem -Path $script:CollectorRoot -Filter 'CLD.*.ps1') {
+                $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$null)
+                foreach ($command in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+                    $name = $command.GetCommandName()
+                    if (-not $name) { continue }
+                    if ($name -in $builtIns) { continue }
+                    if ($name -match '-Exch') { continue }
+                    "$($file.Name): $name"
+                }
+            }
+
+            $violations | Should -BeNullOrEmpty -Because "cloud collectors must not call Exchange cmdlets directly, but found: $($violations -join '; ')"
+        }
+
+        It 'never falls back to the unprefixed cmdlet name' {
+            $run = [pscustomobject]@{
+                Config = @{}; Flags = @{}
+                Cloud  = [pscustomobject]@{ Connected = $true; Prefix = 'ZzUnlikelyPrefix' }
+            }
+            # Get-Date certainly exists; Get-ZzUnlikelyPrefixDate certainly does not. Resolution
+            # must return nothing rather than quietly handing back the unprefixed command.
+            $resolved = & (Get-Module $script:ModuleName) { param($r) Get-ExchCloudCommand -Run $r -Name 'Get-Date' } $run
+            $resolved | Should -BeNullOrEmpty
+        }
+
+        It 'starts every run with a disconnected cloud state' {
+            $state = & (Get-Module $script:ModuleName) { New-ExchCloudState }
+            $state.Connected | Should -BeFalse
+            $state.AuthMode | Should -Be 'None'
+            $state.Reason | Should -Not -BeNullOrEmpty
+        }
+    }
+
+    Context 'Credential hygiene' {
+
+        BeforeAll { Import-Module -Name $script:ManifestPath -Force -ErrorAction Stop }
+
+        It 'redacts sign-in identifiers from the transcript but keeps the tenant name' {
+            $root = Join-Path ([System.IO.Path]::GetTempPath()) ("exchassess-redact-" + [guid]::NewGuid())
+            New-Item -ItemType Directory -Path $root -Force | Out-Null
+            try {
+                $transcript = Join-Path $root 'transcript.txt'
+                Set-Content -Path $transcript -Encoding UTF8 -Value @(
+                    "Command: Invoke-ExchAssess.ps1 -CloudAppId 'AAAA-BBBB' -CloudCertificateThumbprint 'DEADBEEF' -CloudOrganization 'contoso.onmicrosoft.com'"
+                )
+
+                $run = [pscustomobject]@{
+                    RunFolder = $root
+                    TranscriptPath = $transcript
+                    LogPath = (Join-Path $root 'run.jsonl')
+                    CloudAuth = @{
+                        AppId = 'AAAA-BBBB'
+                        CertificateThumbprint = 'DEADBEEF'
+                        Organization = 'contoso.onmicrosoft.com'
+                        UserPrincipalName = ''
+                        ManagedIdentityAccountId = ''
+                    }
+                }
+
+                $count = & (Get-Module $script:ModuleName) { param($r) Protect-ExchRunTranscript -Run $r } $run
+                $count | Should -BeGreaterThan 0
+
+                $content = Get-Content -Path $transcript -Raw
+                $content | Should -Not -Match 'DEADBEEF'
+                $content | Should -Not -Match 'AAAA-BBBB'
+                $content | Should -Match '\[redacted\]'
+                # The organisation is evidence, not a secret, and the report needs it.
+                $content | Should -Match 'contoso\.onmicrosoft\.com'
+            }
+            finally {
+                Remove-Item -Path $root -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
     Context 'Findings are earned, not assumed' {
 
         It 'requires every finding to state an outcome and a rationale' {

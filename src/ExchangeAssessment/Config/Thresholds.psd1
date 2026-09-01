@@ -350,6 +350,27 @@ statement it says so.
     }
 
     # --------------------------------------------------------------------------------------
+    # Exchange Online
+    # https://learn.microsoft.com/powershell/exchange/connect-to-exchange-online-powershell
+    # --------------------------------------------------------------------------------------
+    Cloud = @{
+        # Exchange Online and on-premises Exchange share cmdlet names. The tenant session is
+        # always imported with this prefix so the two can never be confused - Get-AcceptedDomain
+        # becomes Get-CloudAcceptedDomain. Change it only if it collides with something else in
+        # the session.
+        CommandPrefix = 'Cloud'
+        # An inbound connector that accepts mail from any address without requiring TLS or a
+        # certificate is the cloud equivalent of an open relay.
+        RequireConnectorTls = $true
+        # Anti-spam and anti-phish policies that were never tightened from the defaults.
+        RequireAntiPhishPolicy = $true
+        RequireSafeAttachments = $true
+        RequireSafeLinks       = $true
+        # A migration batch that has been sitting in a failed or stalled state.
+        MaxMigrationBatchAgeDays = 30
+    }
+
+    # --------------------------------------------------------------------------------------
     # Reporting
     # --------------------------------------------------------------------------------------
     MaxRowsPerSection = 500

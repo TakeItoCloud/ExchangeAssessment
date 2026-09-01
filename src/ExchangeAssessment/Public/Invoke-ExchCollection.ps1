@@ -47,6 +47,14 @@ function Invoke-ExchCollection {
     $registry = Get-ExchCollectorOrder
     Write-ExchEvent -Run $Run -Level INFO -Message 'Collection started' -Data @{ collectors = @($registry).Count }
 
+    # Connect to the tenant once, before any cloud collector runs. A failure here is reported by
+    # each cloud control rather than stopping the on-premises assessment.
+    $cloudConnected = $false
+    if ($includeCloud) {
+        $Run.Cloud = Connect-ExchOnlineSession -Run $Run
+        $cloudConnected = [bool]$Run.Cloud.Connected
+    }
+
     foreach ($entry in $registry) {
 
         if ($entry.SkipFlag -and $skipFlags.ContainsKey($entry.SkipFlag) -and $skipFlags[$entry.SkipFlag]) {
@@ -117,6 +125,8 @@ function Invoke-ExchCollection {
     $sections.Add((New-ExchInventorySection -Run $Run -Key 'run.errors' -Title 'Errors Recorded During the Run' -Area 'Run' `
         -Columns @('TimestampUtc', 'ControlId', 'Context', 'Severity', 'ExceptionType', 'Message', 'ScriptName', 'LineNumber', 'FullyQualifiedErrorId', 'InnerExceptions') `
         -Rows $errorRows -HighCardinality)) | Out-Null
+
+    if ($cloudConnected) { Disconnect-ExchOnlineSession -Run $Run }
 
     Write-ExchEvent -Run $Run -Level INFO -Message 'Collection finished' -Data @{
         ran = $ran.Count; skipped = $skipped.Count; failed = $failed.Count; errors = @($errorRows).Count

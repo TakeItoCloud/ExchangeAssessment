@@ -23,7 +23,7 @@ evaluate" from "passed", and the analyzer suspensions below are gone.
 | P8 | Packaging and first tagged release | Planned | |
 | P9 | Inventory model, threshold configuration, CSV and JSON reporting | Done | 2026-08-31 |
 | P10 | Full-environment collector coverage (see *P10 scope*) | Done | 2026-09-01 |
-| P11 | Exchange Online collection for the tenant side of a hybrid organisation | Planned | |
+| P11 | Exchange Online collection for the tenant side of a hybrid organisation | Done | 2026-09-01 |
 
 ## The 5.1 constraint
 
@@ -139,13 +139,23 @@ Deliberately not covered, with reasons:
 - **Performance counters** (`Get-Counter`) need a sampling window to mean anything; a
   point-in-time assessment would report noise.
 
-### P11 scope — Exchange Online
+### P11 — Exchange Online — Done 2026-09-01
 
-`Connect-ExchOnline` behind `-IncludeExchangeOnline`, supporting interactive and app-only
-authentication, plus collectors for EXO organisation configuration and accepted domains,
-connectors, anti-spam and Defender policies, and migration endpoints. Cloud collectors are
-already modelled in the registry (`Cloud = $true`) and are skipped unless the switch is given.
-No credential may be written to the run folder.
+`Connect-ExchOnlineSession` behind `-IncludeExchangeOnline`, supporting interactive, app-only
+certificate and managed identity authentication, plus `CLD.ORG-01`, `CLD.CONN-01`, `CLD.SEC-01`
+and `CLD.MIG-01`. Cloud collectors are marked `Cloud = $true` in the registry and are skipped,
+visibly, unless the switch is given.
+
+Two properties are enforced by tests rather than by convention:
+
+- **Prefix isolation.** The tenant session is imported with a command prefix, and cloud
+  collectors read only through `Invoke-ExchCloudQuery`, which resolves the prefixed name and
+  will not fall back to the unprefixed one. Without this, a cloud collector running inside the
+  Exchange Management Shell would silently report on-premises data as tenant data. A test scans
+  the syntax tree of every `CLD.*` collector and fails on any direct Exchange cmdlet call.
+- **No credential in the run folder.** `Start-Transcript` records the launching command line, so
+  `Protect-ExchRunTranscript` redacts the app id, thumbprint, UPN and managed identity account id
+  before the hash manifest is written. The tenant name is deliberately kept.
 
 ### P3 note — property availability across versions
 

@@ -21,7 +21,16 @@ param(
     [Parameter()][string]$ConfigPath,
     # Put every inventory row in assessment.json instead of summarising the large sections.
     [Parameter()][switch]$FullInventory,
-    [Parameter()][switch]$IncludeExchangeOnline
+    [Parameter()][switch]$IncludeExchangeOnline,
+    # Exchange Online sign-in. Interactive needs only -CloudUserPrincipalName; unattended needs
+    # -CloudAppId, -CloudCertificateThumbprint and -CloudOrganization. Nothing here is written to
+    # the run folder.
+    [Parameter()][string]$CloudUserPrincipalName,
+    [Parameter()][string]$CloudAppId,
+    [Parameter()][string]$CloudCertificateThumbprint,
+    [Parameter()][string]$CloudOrganization,
+    [Parameter()][switch]$CloudManagedIdentity,
+    [Parameter()][string]$CloudManagedIdentityAccountId
 )
 
 Set-StrictMode -Version Latest
@@ -34,7 +43,10 @@ try {
     Import-Module $modulePath -Force -ErrorAction Stop
 
     $run = New-ExchRun -OutputRoot $OutputRoot -TenantHint $TenantHint -ConfigPath $ConfigPath `
-        -FullInventory:$FullInventory -IncludeExchangeOnline:$IncludeExchangeOnline
+        -FullInventory:$FullInventory -IncludeExchangeOnline:$IncludeExchangeOnline `
+        -CloudUserPrincipalName $CloudUserPrincipalName -CloudAppId $CloudAppId `
+        -CloudCertificateThumbprint $CloudCertificateThumbprint -CloudOrganization $CloudOrganization `
+        -CloudManagedIdentity:$CloudManagedIdentity -CloudManagedIdentityAccountId $CloudManagedIdentityAccountId
 
     try {
         $pre = Get-ExchPreflightReport

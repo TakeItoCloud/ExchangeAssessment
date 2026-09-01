@@ -16,7 +16,16 @@ function New-ExchRun {
         # Emit every inventory row into assessment.json instead of summarising the sections
         # whose size scales with the organisation.
         [Parameter()][switch]$FullInventory,
-        [Parameter()][switch]$IncludeExchangeOnline
+        [Parameter()][switch]$IncludeExchangeOnline,
+        # Exchange Online authentication. Interactive needs only the UPN; app-only needs the
+        # app id, the certificate thumbprint and the tenant. None of these is written to the run
+        # folder - only the authentication mode and the organisation are recorded.
+        [Parameter()][string]$CloudUserPrincipalName,
+        [Parameter()][string]$CloudAppId,
+        [Parameter()][string]$CloudCertificateThumbprint,
+        [Parameter()][string]$CloudOrganization,
+        [Parameter()][switch]$CloudManagedIdentity,
+        [Parameter()][string]$CloudManagedIdentityAccountId
     )
 
     $runId = [guid]::NewGuid().ToString()
@@ -54,6 +63,15 @@ function New-ExchRun {
         # Every failure recorded by Write-ExchError lands here as well as in the log, so the
         # report can say what could not be read rather than quietly omitting it.
         Errors         = (New-Object System.Collections.Generic.List[object])
+        CloudAuth      = @{
+            UserPrincipalName        = $CloudUserPrincipalName
+            AppId                    = $CloudAppId
+            CertificateThumbprint    = $CloudCertificateThumbprint
+            Organization             = $CloudOrganization
+            ManagedIdentity          = [bool]$CloudManagedIdentity.IsPresent
+            ManagedIdentityAccountId = $CloudManagedIdentityAccountId
+        }
+        Cloud          = (New-ExchCloudState -Prefix ([string](Get-ExchThreshold -Run ([pscustomobject]@{ Config = $config }) -Name 'Cloud.CommandPrefix' -Default 'Cloud')))
         Flags          = @{
             FullInventory         = [bool]$FullInventory.IsPresent
             IncludeExchangeOnline = [bool]$IncludeExchangeOnline.IsPresent
