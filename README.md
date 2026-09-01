@@ -6,10 +6,10 @@ ExchangeAssessment reads an on-premises or hybrid Exchange organisation and repo
 the **configuration** it found, and the **problems** in that configuration. It is read-only —
 every collector reads, and the only writes are into the local run folder.
 
-A run drives 18 collectors across environment and server inventory, Exchange version,
-databases, DAG and replication, transport configuration and connectors, certificates,
-anti-malware, hybrid, identity sync, accepted domains, virtual directories and event logs,
-then writes:
+A run drives 28 collectors across the whole organisation - servers, Active Directory, Exchange
+version and patch state, databases, DAG and replication, transport configuration, connectors and
+queues, certificates, TLS, anti-malware, RBAC, mailboxes, retention and audit, client access,
+public folders, address lists, hybrid, identity sync, DNS posture and event logs - then writes:
 
 - **`csv/`** — one CSV per configuration area, plus `csv/findings.csv`. The complete record.
 - **`assessment.json`** — the whole assessment in one file: configuration inventory, findings
@@ -42,9 +42,31 @@ Extracted from `infra-scripting-suite/powershell/Assessments/ExchangeAssessment`
 | `LOG.EX-01` | Exchange-related error and critical events, grouped by provider and event id |
 | `EX.ADM-01` | Accepted domains, remote domains, email address policies |
 | `EX.VDIR-01` | Nine virtual directory types, Outlook Anywhere, Autodiscover SCP |
+| `TR.QUE-01` | Transport queue depth, age, retry and suspended state |
+| `RBAC-01` | Role groups, privileged membership, management role assignments and scopes |
+| `MB.INV-01` | Mailbox, quota and archive inventory; external forwarding |
+| `RET-01` | Retention policies and tags, litigation hold, administrator and mailbox audit |
+| `CAS-01` | Authentication policies and Basic auth, OWA and mobile device policies, per-mailbox protocols, devices |
+| `AL-01` | Address lists, global address list, offline address books, address book policies |
+| `PF-01` | Public folder mailboxes, hierarchy and legacy public folder databases |
+| `TLS-01` | SCHANNEL protocol state, .NET strong cryptography, serialised data signing |
+| `PTCH-01` | Security update currency, Emergency Mitigation Service, Windows patch cycle |
+| `DNS-01` | MX, SPF and DMARC for every authoritative accepted domain |
 
 Every finding states an outcome **and** the reasoning that produced it. A control that could
 not be evaluated reports `Unknown` with the reason, never a silent pass.
+
+### When something fails
+
+Failures are recorded, not swallowed. Every failed query and every collector that throws is
+written to `logs/run.jsonl` with the exception type, the fully qualified error id, the target,
+the script and line it was thrown from, the offending source line, the full stack trace and the
+whole inner-exception chain. The same failures appear as report rows in `csv/run.errors.csv`
+and in the `run.errors` section of `assessment.json`, so a gap in the assessment is visible to
+whoever reads the report rather than only to whoever reads the log.
+
+`csv/run.collectors.csv` lists every collector with its status, duration and what it produced,
+so a slow or skipped control is obvious at a glance.
 
 ## Requirements
 
@@ -83,6 +105,12 @@ Import-Module .\src\ExchangeAssessment\ExchangeAssessment.psd1 -Force
 # Skip the Active Directory domain/forest/schema queries
 .\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -SkipDomainQueries
 
+# Skip the mailbox enumeration (the one collector whose cost scales with the organisation)
+.\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -SkipMailboxInventory
+
+# Skip the external DNS lookups, for an assessment that must not leave the network
+.\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -SkipDnsQueries
+
 # Put every inventory row in assessment.json instead of summarising the large sections
 .\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -FullInventory
 
@@ -91,15 +119,16 @@ Import-Module .\src\ExchangeAssessment\ExchangeAssessment.psd1 -Force
 ```
 
 The script returns a summary object carrying `FindingsCount`, `SectionCount`, `CollectorsRun`,
-`CollectorsSkipped`, `CollectorsFailed`, `FindingsPath`, `AssessmentJson`, `CsvFolder`,
-`CsvFileCount`, `BundleZip`, `RunFolder` and `HashManifest`.
+`CollectorsSkipped`, `CollectorsFailed`, `ErrorsLogged`, `FindingsPath`, `AssessmentJson`,
+`CsvFolder`, `CsvFileCount`, `BundleZip`, `RunFolder` and `HashManifest`.
 
 ### Output layout
 
 ```
 <OutputRoot>/<tenant>-<utc timestamp>-<run id>/
   assessment.json           the whole assessment in one file
-  csv/                      one CSV per configuration area, plus findings.csv
+  csv/                      one CSV per configuration area, plus findings.csv,
+                            run.collectors.csv and run.errors.csv
   evidence/                 raw per-control JSON, and findings/findings.json
   generated/                control catalog and framework crosswalks
   logs/                     run.jsonl and the transcript
@@ -149,7 +178,9 @@ Both must report zero failures and zero findings, run from the repository root. 
 CI runs on Linux with no Exchange available, so the suite checks structure rather than
 behaviour against a live organisation: that the catalog and the finding schema agree, that the
 collector registry resolves and orders correctly, that **no collector invokes a cmdlet that
-changes state**, that no collector hardcodes a `Compliant` outcome, and that the CSV and JSON
+changes state** (checked against the parsed syntax tree, so a cmdlet named in a comment is not
+mistaken for a call), that no collector hardcodes a `Compliant` outcome, that a failure is
+captured with its full detail and reaches the run's error list, and that the CSV and JSON
 writers produce what they promise. Verifying the collectors against a real organisation is
 [PORT-PLAN.md](PORT-PLAN.md) phase P3 and is still open.
 

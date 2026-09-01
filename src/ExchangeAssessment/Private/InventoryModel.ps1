@@ -108,7 +108,10 @@ function New-ExchCollectorFailureFinding {
     param(
         [Parameter(Mandatory)][string]$ControlId,
         [Parameter(Mandatory)][string]$Area,
-        [Parameter(Mandatory)][string]$Message
+        [Parameter(Mandatory)][string]$Message,
+        # The flattened ErrorRecord from Write-ExchError, so the finding carries enough to
+        # diagnose the failure without going back to the log.
+        [Parameter()]$Detail
     )
 
     $control = $null
@@ -136,10 +139,11 @@ function New-ExchCollectorFailureFinding {
         -Description $target `
         -Outcome 'Unknown' `
         -Sufficiency 'HardFail' `
-        -Rationale ("The {0} collector threw and the control was not evaluated: {1}" -f $ControlId, $Message) `
-        -Remediation 'Review the run log, resolve the underlying error, and re-run the assessment. This control has no result until it does.' `
+        -Rationale ("The {0} collector threw and the control was not evaluated: {1}{2}" -f $ControlId, $Message, `
+            $(if ($Detail -and $Detail.scriptName) { " (thrown at {0} line {1})" -f (Split-Path -Path ([string]$Detail.scriptName) -Leaf), $Detail.lineNumber } else { '' })) `
+        -Remediation 'The full error detail, including the exception type and stack trace, is in logs/run.jsonl and the run.errors section. Resolve the underlying error and re-run: this control has no result until it does.' `
         -FrameworkMappings $mappings `
         -References $references `
-        -Metrics @{ error = $Message; area = $Area } `
+        -Metrics @{ error = $Message; area = $Area; errorDetail = $Detail } `
         -Meta @{ dataSources = @{ Collector = @{ state = 'Error'; reason = $Message } }; evaluationStatus = 'Failed' }
 }

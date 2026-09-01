@@ -30,7 +30,7 @@ function Invoke-ExchCollector_EX_VDIR_01_VirtualDirectories {
 
     $rows = New-Object System.Collections.Generic.List[object]
     foreach ($source in $sources) {
-        foreach ($vdir in @(Invoke-ExchQuery -Label ("virtual directory '{0}'" -f $source.Type) -Errors $errors -Script $source.Script)) {
+        foreach ($vdir in @(Invoke-ExchQuery -Label ("virtual directory '{0}'" -f $source.Type) -Errors $errors -Run $Run -ControlId $control.controlId -Script $source.Script)) {
             $internal = [string]$vdir.InternalUrl
             $external = [string]$vdir.ExternalUrl
             $auth = Get-ExchVirtualDirectoryAuth -VirtualDirectory $vdir
@@ -51,7 +51,7 @@ function Invoke-ExchCollector_EX_VDIR_01_VirtualDirectories {
     }
 
     $outlookAnywhere = New-Object System.Collections.Generic.List[object]
-    foreach ($oa in @(Invoke-ExchQuery -Label 'Get-OutlookAnywhere' -Errors $errors -Script { Get-OutlookAnywhere -ErrorAction Stop })) {
+    foreach ($oa in @(Invoke-ExchQuery -Label 'Get-OutlookAnywhere' -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-OutlookAnywhere -ErrorAction Stop })) {
         $outlookAnywhere.Add([pscustomobject]@{
             Server                = [string]$oa.ServerName
             ExternalHostname      = [string]$oa.ExternalHostname
@@ -65,7 +65,7 @@ function Invoke-ExchCollector_EX_VDIR_01_VirtualDirectories {
     }
 
     $scpRows = New-Object System.Collections.Generic.List[object]
-    foreach ($cas in @(Invoke-ExchQuery -Label 'Get-ClientAccessService' -Errors $errors -Script { Get-ClientAccessService -ErrorAction Stop })) {
+    foreach ($cas in @(Invoke-ExchQuery -Label 'Get-ClientAccessService' -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-ClientAccessService -ErrorAction Stop })) {
         $scpRows.Add([pscustomobject]@{
             Server = [string]$cas.Name
             AutoDiscoverServiceInternalUri = [string]$cas.AutoDiscoverServiceInternalUri

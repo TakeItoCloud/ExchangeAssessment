@@ -17,7 +17,7 @@ function Invoke-ExchCollector_ENV_OS_01_ExchangeOS {
     try { $servers = @(Get-ExchangeServer -ErrorAction Stop) }
     catch {
         $reason = "Get-ExchangeServer failed, so no server operating systems could be assessed: $($_.Exception.Message)"
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'Get-ExchangeServer failed' -Data @{ error = $_.Exception.Message }
+        $null = Write-ExchError -Run $Run -Context 'Get-ExchangeServer' -ErrorRecord $_ -ControlId $control.controlId
         return New-ExchCollectorResult -Findings @(
             New-ExchUnavailableFinding -Control $control -Reason $reason `
                 -Remediation 'Run the assessment from an Exchange Management Shell using an account with at least View-Only Organization Management.'
@@ -77,10 +77,11 @@ function Invoke-ExchCollector_ENV_OS_01_ExchangeOS {
                 }
             }
             catch {
-                Write-ExchEvent -Run $Run -Level WARN -Message 'Disk query failed' -Data @{ server = $name; error = $_.Exception.Message }
+                $null = Write-ExchError -Run $Run -Context ('Get-CimInstance Win32_LogicalDisk on {0}' -f $name) -ErrorRecord $_ -ControlId $control.controlId -Severity 'Warning'
             }
         }
         catch {
+            $null = Write-ExchError -Run $Run -Context ('Get-CimInstance Win32_OperatingSystem on {0}' -f $name) -ErrorRecord $_ -ControlId $control.controlId -Severity 'Warning'
             $records.Add([pscustomobject]@{
                 Server = $name; OperatingSystem = 'Unread'; Caption = ''; Version = ''; BuildNumber = ''
                 Supported = $false; Recommended = $false; LastBoot = $null; UptimeDays = $null

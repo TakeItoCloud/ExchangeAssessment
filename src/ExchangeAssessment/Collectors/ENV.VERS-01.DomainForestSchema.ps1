@@ -19,7 +19,7 @@ function Invoke-ExchCollector_ENV_VERS_01_DomainForestSchema {
     try { Assert-ExchADModule -Run $Run }
     catch {
         $reason = "The ActiveDirectory module is not available, so forest, domain and Exchange schema state could not be read: $($_.Exception.Message)"
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'ActiveDirectory module unavailable' -Data @{ error = $_.Exception.Message }
+        $null = Write-ExchError -Run $Run -Context 'Import ActiveDirectory module' -ErrorRecord $_ -ControlId $control.controlId
         return New-ExchCollectorResult -Findings @(
             New-ExchUnavailableFinding -Control $control -Reason $reason -DataSource 'ActiveDirectory' `
                 -Remediation 'Install RSAT Active Directory PowerShell on the Exchange server, or run the assessment from a host that has it, then re-run.'
@@ -33,7 +33,7 @@ function Invoke-ExchCollector_ENV_VERS_01_DomainForestSchema {
     }
     catch {
         $reason = "Active Directory could not be queried for forest, domain or RootDSE information: $($_.Exception.Message)"
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'ENV.VERS-01 AD query failed' -Data @{ error = $_.Exception.Message }
+        $null = Write-ExchError -Run $Run -Context 'Get-ADRootDSE / Get-ADForest / Get-ADDomain' -ErrorRecord $_ -ControlId $control.controlId
         return New-ExchCollectorResult -Findings @(
             New-ExchUnavailableFinding -Control $control -Reason $reason -DataSource 'ActiveDirectory' `
                 -Remediation 'Confirm the account running the assessment can read the forest, domain and schema naming contexts, then re-run.'

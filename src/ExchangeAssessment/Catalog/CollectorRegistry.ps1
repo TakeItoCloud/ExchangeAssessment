@@ -10,6 +10,7 @@ here plus a file under Collectors/ - nothing else changes.
   Requires  control ids whose results are passed to this collector as -Upstream
   Cloud     true when the collector needs an Exchange Online session
   SkipFlag  name of a switch on Invoke-ExchCollection that suppresses this collector
+            (SkipDomainQueries, SkipMailboxInventory, SkipDnsQueries)
 #>
 
 Set-StrictMode -Version Latest
@@ -37,6 +38,16 @@ function Get-ExchCollectorRegistry {
         @{ Id='SRV-01';      Function='Invoke-ExchCollector_SRV_01_ServerInventory';        Area='Environment'; Requires=@();                                     Cloud=$false; SkipFlag='' }
         @{ Id='TR.CFG-01';   Function='Invoke-ExchCollector_TR_CFG_01_TransportConfig';     Area='Transport';   Requires=@();                                     Cloud=$false; SkipFlag='' }
         @{ Id='REPL-01';     Function='Invoke-ExchCollector_REPL_01_ReplicationHealth';     Area='Mailbox';     Requires=@();                                     Cloud=$false; SkipFlag='' }
+        @{ Id='TR.QUE-01';   Function='Invoke-ExchCollector_TR_QUE_01_TransportQueue';      Area='Transport';   Requires=@();                                     Cloud=$false; SkipFlag='' }
+        @{ Id='RBAC-01';     Function='Invoke-ExchCollector_RBAC_01_RoleBasedAccess';       Area='Security';    Requires=@();                                     Cloud=$false; SkipFlag='' }
+        @{ Id='MB.INV-01';   Function='Invoke-ExchCollector_MB_INV_01_MailboxInventory';    Area='Mailbox';     Requires=@();                                     Cloud=$false; SkipFlag='SkipMailboxInventory' }
+        @{ Id='RET-01';      Function='Invoke-ExchCollector_RET_01_RetentionCompliance';    Area='Compliance';  Requires=@();                                     Cloud=$false; SkipFlag='' }
+        @{ Id='CAS-01';      Function='Invoke-ExchCollector_CAS_01_ClientAccess';           Area='Client';      Requires=@();                                     Cloud=$false; SkipFlag='' }
+        @{ Id='AL-01';       Function='Invoke-ExchCollector_AL_01_AddressLists';            Area='Exchange';    Requires=@();                                     Cloud=$false; SkipFlag='' }
+        @{ Id='PF-01';       Function='Invoke-ExchCollector_PF_01_PublicFolders';           Area='Exchange';    Requires=@();                                     Cloud=$false; SkipFlag='' }
+        @{ Id='TLS-01';      Function='Invoke-ExchCollector_TLS_01_TlsConfiguration';       Area='Security';    Requires=@();                                     Cloud=$false; SkipFlag='' }
+        @{ Id='PTCH-01';     Function='Invoke-ExchCollector_PTCH_01_SecurityUpdates';       Area='Security';    Requires=@('EX.CH-01');                           Cloud=$false; SkipFlag='' }
+        @{ Id='DNS-01';      Function='Invoke-ExchCollector_DNS_01_MailDnsPosture';         Area='Network';     Requires=@();                                     Cloud=$false; SkipFlag='SkipDnsQueries' }
     )
 }
 

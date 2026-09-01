@@ -20,7 +20,7 @@ function Invoke-ExchCollector_EX_CH_01_ExchangeVersionCU {
     try { $servers = @(Get-ExchangeServer -ErrorAction Stop) }
     catch {
         $reason = "Get-ExchangeServer failed, so no Exchange build could be read: $($_.Exception.Message)"
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'Get-ExchangeServer failed' -Data @{ error = $_.Exception.Message }
+        $null = Write-ExchError -Run $Run -Context 'Get-ExchangeServer' -ErrorRecord $_ -ControlId $control.controlId
         return New-ExchCollectorResult -Findings @(
             New-ExchUnavailableFinding -Control $control -Reason $reason `
                 -Remediation 'Run the assessment from an Exchange Management Shell using an account that can enumerate servers.'

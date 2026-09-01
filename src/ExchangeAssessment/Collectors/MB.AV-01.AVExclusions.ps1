@@ -63,6 +63,7 @@ function Invoke-ExchCollector_MB_AV_01_AVExclusions {
             }
         }
         catch {
+            $null = Write-ExchError -Run $Run -Context ('Get-MpPreference on {0}' -f $name) -ErrorRecord $_ -ControlId $control.controlId -Severity 'Warning'
             $serverRows.Add([pscustomobject]@{
                 Server = $name; Status = 'Not assessed'; ExclusionPaths = ''; ExclusionProcesses = ''
                 PathCount = 0; ProcessCount = 0; MissingPathCount = 0; MissingProcessCount = 0

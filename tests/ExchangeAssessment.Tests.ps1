@@ -192,6 +192,66 @@ Describe 'ExchangeAssessment' {
         }
     }
 
+    Context 'Failure logging' {
+
+        BeforeAll { Import-Module -Name $script:ManifestPath -Force -ErrorAction Stop }
+
+        It 'captures the exception type, position and inner chain from an ErrorRecord' {
+            $record = $null
+            try { throw (New-Object System.InvalidOperationException('outer', (New-Object System.IO.FileNotFoundException('inner')))) }
+            catch { $record = $_ }
+
+            $detail = & (Get-Module $script:ModuleName) { param($r) Get-ExchErrorDetail -ErrorRecord $r } $record
+
+            $detail.message | Should -Be 'outer'
+            $detail.exceptionType | Should -Be 'System.InvalidOperationException'
+            $detail.scriptStackTrace | Should -Not -BeNullOrEmpty
+            $detail.lineNumber | Should -BeGreaterThan 0
+            @($detail.innerExceptions).Count | Should -Be 1
+            $detail.innerExceptions[0].message | Should -Be 'inner'
+        }
+
+        It 'records a failure on the run so it reaches the report, not just the log' {
+            $root = Join-Path ([System.IO.Path]::GetTempPath()) ("exchassess-log-" + [guid]::NewGuid())
+            New-Item -ItemType Directory -Path $root -Force | Out-Null
+            try {
+                $run = [pscustomobject]@{
+                    RunId = 'test'; TenantHint = 'test'; RunFolder = $root
+                    LogPath = (Join-Path $root 'run.jsonl'); ConfigPath = ''
+                    Config = @{}; Flags = @{}
+                    Errors = (New-Object System.Collections.Generic.List[object])
+                }
+
+                $record = $null
+                try { throw 'collector blew up' } catch { $record = $_ }
+
+                $null = & (Get-Module $script:ModuleName) {
+                    param($r, $e) Write-ExchError -Run $r -Context 'Get-Something' -ErrorRecord $e -ControlId 'ENV.OS-01'
+                } $run $record
+
+                # An empty List returned from a function unrolls to $null, which once silently
+                # swallowed the first error of every run. Guard the behaviour, not just the count.
+                $run.Errors.Count | Should -Be 1
+                $run.Errors[0].controlId | Should -Be 'ENV.OS-01'
+                $run.Errors[0].context | Should -Be 'Get-Something'
+                $run.Errors[0].detail.message | Should -Be 'collector blew up'
+
+                (Join-Path $root 'run.jsonl') | Should -Exist
+                (Get-Content -Path (Join-Path $root 'run.jsonl') -Raw) | Should -Match 'Get-Something failed'
+            }
+            finally {
+                Remove-Item -Path $root -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It 'returns the run error list even when it is still empty' {
+            $run = [pscustomobject]@{ Errors = (New-Object System.Collections.Generic.List[object]) }
+            $list = & (Get-Module $script:ModuleName) { param($r) Get-ExchRunErrorList -Run $r } $run
+            $list | Should -Not -BeNullOrEmpty -Because 'an empty list must not unroll to $null'
+            $list.GetType().Name | Should -Be 'List`1'
+        }
+    }
+
     Context 'Report writers' {
 
         BeforeAll {

@@ -21,7 +21,10 @@ function Invoke-ExchCollector_ID_SYNC_01_AADConnectStatus {
 
     $service = $null
     try { $service = Get-Service -Name 'ADSync' -ErrorAction Stop }
-    catch { $errors.Add("ADSync service not present on $($env:COMPUTERNAME)") | Out-Null }
+    catch {
+        $errors.Add("ADSync service not present on $($env:COMPUTERNAME)") | Out-Null
+        $null = Write-ExchError -Run $Run -Context 'Get-Service ADSync' -ErrorRecord $_ -ControlId $control.controlId -Severity 'Warning'
+    }
 
     $scheduler = $null
     if ($service) {
@@ -32,7 +35,10 @@ function Invoke-ExchCollector_ID_SYNC_01_AADConnectStatus {
             }
             else { $errors.Add('ADSync PowerShell module not available') | Out-Null }
         }
-        catch { $errors.Add("Get-ADSyncScheduler failed: $($_.Exception.Message)") | Out-Null }
+        catch {
+            $errors.Add("Get-ADSyncScheduler failed: $($_.Exception.Message)") | Out-Null
+            $null = Write-ExchError -Run $Run -Context 'Get-ADSyncScheduler' -ErrorRecord $_ -ControlId $control.controlId -Severity 'Warning'
+        }
     }
 
     $lastSync = $null

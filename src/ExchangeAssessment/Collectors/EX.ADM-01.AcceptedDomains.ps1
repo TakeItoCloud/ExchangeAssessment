@@ -17,9 +17,9 @@ function Invoke-ExchCollector_EX_ADM_01_AcceptedDomains {
 
     $errors = New-Object System.Collections.Generic.List[string]
 
-    $accepted = @(Invoke-ExchQuery -Label 'Get-AcceptedDomain'      -Errors $errors -Script { Get-AcceptedDomain -ErrorAction Stop })
-    $remote   = @(Invoke-ExchQuery -Label 'Get-RemoteDomain'        -Errors $errors -Script { Get-RemoteDomain -ErrorAction Stop })
-    $policies = @(Invoke-ExchQuery -Label 'Get-EmailAddressPolicy'  -Errors $errors -Script { Get-EmailAddressPolicy -ErrorAction Stop })
+    $accepted = @(Invoke-ExchQuery -Label 'Get-AcceptedDomain'      -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-AcceptedDomain -ErrorAction Stop })
+    $remote   = @(Invoke-ExchQuery -Label 'Get-RemoteDomain'        -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-RemoteDomain -ErrorAction Stop })
+    $policies = @(Invoke-ExchQuery -Label 'Get-EmailAddressPolicy'  -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-EmailAddressPolicy -ErrorAction Stop })
 
     if ($accepted.Count -eq 0 -and @($errors | Where-Object { $_ -like 'Get-AcceptedDomain*' }).Count -gt 0) {
         return New-ExchCollectorResult -Findings @(

@@ -17,12 +17,12 @@ evaluate" from "passed", and the analyzer suspensions below are gone.
 | P2 | Retire the four analyzer suspensions (see *Inherited analyzer debt*) | Mostly done | 2026-08-31 |
 | P3 | Runtime verification against a live Exchange organisation | Planned | |
 | P4 | Finish the AV exclusion check — compare, do not just report | Done | 2026-08-31 |
-| P5 | Operational health checks: service, mail flow, replication, queues, index | Partly done | 2026-08-31 |
+| P5 | Operational health checks: service, mail flow, replication, queues, index | Done | 2026-09-01 |
 | P6 | Ignore list, alerting and scheduled-run modes | Planned | |
 | P7 | Operational documentation output | Superseded by P9 | 2026-08-31 |
 | P8 | Packaging and first tagged release | Planned | |
 | P9 | Inventory model, threshold configuration, CSV and JSON reporting | Done | 2026-08-31 |
-| P10 | Full-environment collector coverage (see *P10 scope*) | Partly done | 2026-09-01 |
+| P10 | Full-environment collector coverage (see *P10 scope*) | Done | 2026-09-01 |
 | P11 | Exchange Online collection for the tenant side of a hybrid organisation | Planned | |
 
 ## The 5.1 constraint
@@ -112,27 +112,32 @@ this uncovered.
 
 ### P10 scope — full-environment coverage
 
-Three of the named gaps are closed: `SRV-01` (server inventory, roles, AD sites, service
-health, component states), `TR.CFG-01` (organisation and per-server transport configuration,
-transport and journal rules) and `REPL-01` (`Test-ReplicationHealth`, `Test-MAPIConnectivity`).
+Closed. The organisation is now covered by 28 controls:
 
-Still absent, in rough priority order:
+| Added | Control |
+| --- | --- |
+| Server inventory, roles, AD sites, service health, component states | `SRV-01` |
+| Organisation and per-server transport configuration, transport and journal rules | `TR.CFG-01` |
+| `Test-ReplicationHealth` and `Test-MAPIConnectivity` | `REPL-01` |
+| Transport queue depth, age, retry and suspended state | `TR.QUE-01` |
+| Role groups, privileged membership, role assignments and scopes | `RBAC-01` |
+| Mailbox, quota and archive inventory, external forwarding | `MB.INV-01` |
+| Retention policies and tags, holds, administrator and mailbox audit | `RET-01` |
+| Authentication policies, Basic auth, OWA and mobile policies, per-mailbox protocols, devices | `CAS-01` |
+| Address lists, GAL, offline address books, address book policies | `AL-01` |
+| Public folder mailboxes, hierarchy, legacy databases | `PF-01` |
+| SCHANNEL and .NET TLS state, serialised data signing | `TLS-01` |
+| Security update currency, Emergency Mitigation Service, Windows patch cycle | `PTCH-01` |
+| MX, SPF and DMARC per authoritative domain | `DNS-01` |
 
-- **Transport queues** — `Get-Queue`, `Get-Message`, queue age and depth
-- **RBAC** — role groups, management role assignments, management scopes
-- **Mailboxes** — inventory, quotas, archives, litigation hold
-- **Retention and compliance** — retention policies and tags, audit configuration
-- **Client access policies** — ActiveSync and OWA mailbox policies, `Get-CASMailbox`,
-  authentication policies, mobile devices
-- **Address lists** — address lists, GAL, offline address books, address book policies
-- **Public folders**
-- **TLS** — SCHANNEL and .NET registry state, `Get-AuthConfig` serialised data signing
-- **Patch state** — `Get-HotFix`, Exchange Emergency Mitigation Service, CVE matrix against
-  the build table
-- **DNS posture** — MX, SPF, DMARC and MTA-STS for each authoritative accepted domain
+Deliberately not covered, with reasons:
 
-Each is a registry row plus a collector file plus its threshold keys; the reporting layer does
-not change.
+- **`Test-Mailflow`** sends live probe messages, which is a write. Mail flow is assessed from
+  connector configuration, transport configuration and queue state instead.
+- **`Get-Message`** returns per-message data that would be a privacy exposure in an assessment
+  artifact. `TR.QUE-01` reports queue depth and age, not message contents.
+- **Performance counters** (`Get-Counter`) need a sampling window to mean anything; a
+  point-in-time assessment would report noise.
 
 ### P11 scope — Exchange Online
 

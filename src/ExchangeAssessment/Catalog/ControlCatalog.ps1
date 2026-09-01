@@ -258,6 +258,144 @@ function Get-ExchControlCatalog {
                 @{ title='Disable Basic authentication in Exchange Server'; url='https://learn.microsoft.com/exchange/clients-and-mobile-in-exchange-online/disable-basic-authentication-in-exchange-online' }
             )
         }
+        @{
+            controlId  = 'TR.QUE-01'
+            domain     = 'Transport'
+            title      = 'Transport queue depth and age'
+            target     = 'No transport queue is backing up or holding messages beyond the acceptable age, and no queue is in a retry or suspended state.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.8.16'; note='Monitoring activities (mail flow)' }
+            )
+            references = @(
+                @{ title='Queues and messages in queues'; url='https://learn.microsoft.com/exchange/mail-flow/queues/queues' }
+                @{ title='Get-Queue'; url='https://learn.microsoft.com/powershell/module/exchange/get-queue' }
+            )
+        },
+        @{
+            controlId  = 'RBAC-01'
+            domain     = 'Security'
+            title      = 'Role based access control and privileged group membership'
+            target     = 'Privileged Exchange role groups have a small, known membership; no unexpected delegation grants organisation-wide management rights.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.5.15'; note='Access control' }
+                @{ framework='ISO27001:2022'; ref='A.8.2'; note='Privileged access rights' }
+                @{ framework='CISv8'; ref='5.4'; note='Restrict administrator privileges to dedicated accounts' }
+            )
+            references = @(
+                @{ title='Understanding role based access control'; url='https://learn.microsoft.com/exchange/permissions/role-based-access-control' }
+                @{ title='Built-in management role groups'; url='https://learn.microsoft.com/exchange/permissions/role-groups' }
+            )
+        },
+        @{
+            controlId  = 'MB.INV-01'
+            domain     = 'Mailbox'
+            title      = 'Mailbox, quota and archive inventory'
+            target     = 'Mailboxes are inventoried with their database, size, quota and archive state; none is at or over its send quota and none has unexpected forwarding configured.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.5.9'; note='Inventory of information and associated assets' }
+                @{ framework='ISO27001:2022'; ref='A.8.12'; note='Data leakage prevention (forwarding)' }
+            )
+            references = @(
+                @{ title='Get-Mailbox'; url='https://learn.microsoft.com/powershell/module/exchange/get-mailbox' }
+                @{ title='Configure storage quotas for a mailbox'; url='https://learn.microsoft.com/exchange/recipients/user-mailboxes/mailbox-storage-quotas' }
+            )
+        },
+        @{
+            controlId  = 'RET-01'
+            domain     = 'Compliance'
+            title      = 'Retention, holds and audit configuration'
+            target     = 'Retention policies and tags are defined and applied, litigation hold state is known, and administrator and mailbox audit logging is enabled.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.5.33'; note='Protection of records' }
+                @{ framework='ISO27001:2022'; ref='A.8.15'; note='Logging' }
+                @{ framework='CISv8'; ref='8.2'; note='Collect audit logs' }
+            )
+            references = @(
+                @{ title='Retention tags and retention policies'; url='https://learn.microsoft.com/exchange/policy-and-compliance/mrm/retention-tags-and-retention-policies' }
+                @{ title='Administrator audit logging'; url='https://learn.microsoft.com/exchange/policy-and-compliance/admin-audit-logging/admin-audit-logging' }
+            )
+        },
+        @{
+            controlId  = 'CAS-01'
+            domain     = 'Client'
+            title      = 'Client access policies and legacy authentication'
+            target     = 'Mobile device and Outlook on the web policies are defined, legacy protocols are constrained, and Basic authentication is blocked by an authentication policy.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.8.5'; note='Secure authentication' }
+                @{ framework='CISv8'; ref='6.4'; note='Require MFA for remote access' }
+            )
+            references = @(
+                @{ title='Disable Basic authentication in Exchange Server'; url='https://learn.microsoft.com/exchange/clients-and-mobile-in-exchange-online/disable-basic-authentication-in-exchange-online' }
+                @{ title='Mobile device mailbox policies'; url='https://learn.microsoft.com/exchange/clients/exchange-activesync/mobile-device-mailbox-policies' }
+            )
+        },
+        @{
+            controlId  = 'AL-01'
+            domain     = 'Exchange'
+            title      = 'Address lists and offline address book'
+            target     = 'Address lists, the global address list and offline address books are defined and the OAB has a generating mailbox.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.8.9'; note='Configuration management' }
+            )
+            references = @(
+                @{ title='Address lists in Exchange Server'; url='https://learn.microsoft.com/exchange/address-books/address-lists/address-lists' }
+                @{ title='Offline address books in Exchange Server'; url='https://learn.microsoft.com/exchange/address-books/offline-address-books/offline-address-books' }
+            )
+        },
+        @{
+            controlId  = 'PF-01'
+            domain     = 'Exchange'
+            title      = 'Public folder deployment'
+            target     = 'Public folder mailboxes and hierarchy are inventoried, a primary hierarchy mailbox exists, and no legacy public folder database remains.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.5.9'; note='Inventory of information and associated assets' }
+            )
+            references = @(
+                @{ title='Public folders in Exchange Server'; url='https://learn.microsoft.com/exchange/collaboration/public-folders/public-folders' }
+            )
+        },
+        @{
+            controlId  = 'TLS-01'
+            domain     = 'Security'
+            title      = 'TLS protocol and .NET cryptography configuration'
+            target     = 'TLS 1.2 is enabled and the deprecated SSL and TLS protocols are disabled for both client and server, .NET is configured for strong cryptography and system default TLS versions, and Exchange serialised data signing is enabled.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.8.24'; note='Use of cryptography' }
+                @{ framework='CISv8'; ref='3.10'; note='Encrypt sensitive data in transit' }
+            )
+            references = @(
+                @{ title='Exchange Server TLS configuration best practices'; url='https://learn.microsoft.com/exchange/exchange-tls-configuration' }
+                @{ title='Configure Exchange Server for serialized data signing'; url='https://learn.microsoft.com/powershell/module/exchange/get-authconfig' }
+            )
+        },
+        @{
+            controlId  = 'PTCH-01'
+            domain     = 'Security'
+            title      = 'Security update state and emergency mitigations'
+            target     = 'Exchange servers carry a current security update, the Exchange Emergency Mitigation Service is available and applying mitigations, and no server is exposed to a known unpatched vulnerability.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.8.8'; note='Management of technical vulnerabilities' }
+                @{ framework='CISv8'; ref='7.4'; note='Perform automated application patch management' }
+            )
+            references = @(
+                @{ title='Exchange Emergency Mitigation Service'; url='https://learn.microsoft.com/exchange/exchange-emergency-mitigation-service' }
+                @{ title='Exchange Server build numbers and release dates'; url='https://learn.microsoft.com/exchange/new-features/build-numbers-and-release-dates' }
+            )
+        },
+        @{
+            controlId  = 'DNS-01'
+            domain     = 'Network'
+            title      = 'External mail DNS posture'
+            target     = 'Every authoritative accepted domain publishes MX, a restrictive SPF record, and a DMARC policy.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.5.7'; note='Threat intelligence and mail domain abuse' }
+                @{ framework='CISv8'; ref='9.5'; note='Implement DMARC' }
+            )
+            references = @(
+                @{ title='How SPF prevents spoofing'; url='https://learn.microsoft.com/defender-office-365/email-authentication-spf-configure' }
+                @{ title='Use DMARC to validate email'; url='https://learn.microsoft.com/defender-office-365/email-authentication-dmarc-configure' }
+            )
+        }
     )
 
     return $controls

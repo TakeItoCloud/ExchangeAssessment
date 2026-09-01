@@ -18,7 +18,7 @@ function Invoke-ExchCollector_DAG_01_DagHealth {
     try { $dags = @(Get-DatabaseAvailabilityGroup -Status -ErrorAction Stop) }
     catch {
         $reason = "Get-DatabaseAvailabilityGroup failed, so DAG state could not be assessed: $($_.Exception.Message)"
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'Get-DatabaseAvailabilityGroup failed' -Data @{ error = $_.Exception.Message }
+        $null = Write-ExchError -Run $Run -Context 'Get-DatabaseAvailabilityGroup' -ErrorRecord $_ -ControlId $control.controlId
         return New-ExchCollectorResult -Findings @(
             New-ExchUnavailableFinding -Control $control -Reason $reason -Severity 'Medium' `
                 -Remediation 'Run from an Exchange Management Shell with rights to query database availability groups.'
@@ -67,6 +67,7 @@ function Invoke-ExchCollector_DAG_01_DagHealth {
         }
         catch {
             $networkErrors.Add(("{0}: {1}" -f $dag.Name, $_.Exception.Message)) | Out-Null
+            $null = Write-ExchError -Run $Run -Context ('Get-DatabaseAvailabilityGroupNetwork on {0}' -f $dag.Name) -ErrorRecord $_ -ControlId $control.controlId -Severity 'Warning'
         }
     }
 

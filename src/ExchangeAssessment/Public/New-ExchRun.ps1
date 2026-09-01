@@ -51,6 +51,9 @@ function New-ExchRun {
         StartedUtc     = (Get-Date).ToUniversalTime()
         Config         = $config
         ConfigPath     = $ConfigPath
+        # Every failure recorded by Write-ExchError lands here as well as in the log, so the
+        # report can say what could not be read rather than quietly omitting it.
+        Errors         = (New-Object System.Collections.Generic.List[object])
         Flags          = @{
             FullInventory         = [bool]$FullInventory.IsPresent
             IncludeExchangeOnline = [bool]$IncludeExchangeOnline.IsPresent

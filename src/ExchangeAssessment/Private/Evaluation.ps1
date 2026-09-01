@@ -230,6 +230,10 @@ function Invoke-ExchQuery {
     Collectors that read several independent configuration objects use this so that one missing
     cmdlet does not hide the others - and so the finding can say exactly which query failed
     instead of reporting a silent pass.
+
+    The short message goes into $Errors for the finding's rationale. When -Run is supplied the
+    full error detail - exception type, error id, target, script position, stack trace and the
+    inner exception chain - is written to the run log and the run's error list as well.
     #>
     [CmdletBinding()]
     param(
@@ -237,12 +241,20 @@ function Invoke-ExchQuery {
         # AllowEmptyCollection: an empty error list is the normal case, and PowerShell
         # otherwise refuses to bind it to a mandatory collection parameter.
         [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Errors,
-        [Parameter(Mandatory)][scriptblock]$Script
+        [Parameter(Mandatory)][scriptblock]$Script,
+        [Parameter()]$Run,
+        [Parameter()][string]$ControlId = ''
     )
 
     try { return & $Script }
     catch {
         $Errors.Add(("{0}: {1}" -f $Label, $_.Exception.Message)) | Out-Null
+
+        if ($Run) {
+            try { $null = Write-ExchError -Run $Run -Context $Label -ErrorRecord $_ -ControlId $ControlId -Severity 'Warning' }
+            catch { Write-Warning ("Could not record the failure of {0}: {1}" -f $Label, $_.Exception.Message) }
+        }
+
         return @()
     }
 }

@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-09-01 (phase P10, complete)
+
+Ten collectors, taking coverage to 28 controls across the whole organisation.
+
+- **`TR.QUE-01`** transport queue depth, age, retry and suspended state, with the poison queue
+  called out separately. The finding says it is a single sample, because a queue that is
+  draining and one that is stuck look identical from one reading.
+- **`RBAC-01`** role groups, privileged membership, management role assignments and scopes.
+  Organization Management membership is the headline number: it is administrative control of
+  every mailbox in the estate.
+- **`MB.INV-01`** mailbox, quota and archive inventory, and mailboxes forwarding outside the
+  organisation. Capped by `Mailbox.MaxMailboxes` and skippable with `-SkipMailboxInventory`;
+  when the cap bites the finding says so rather than reporting a sample as the whole estate.
+- **`RET-01`** retention policies and tags, litigation hold, administrator audit configuration
+  and mailbox audit bypass.
+- **`CAS-01`** authentication policies and whether any of them actually blocks Basic
+  authentication on every protocol, OWA and mobile device policies, per-mailbox legacy
+  protocols, and stale device partnerships.
+- **`AL-01`** address lists, global address list and offline address books, including an OAB
+  with no generating mailbox, which leaves Outlook with a stale address book.
+- **`PF-01`** public folder mailboxes, hierarchy and legacy public folder databases.
+- **`TLS-01`** SCHANNEL protocol state per server and role, .NET strong cryptography and system
+  default TLS versions, and Exchange serialised data signing. An absent SCHANNEL key is reported
+  as the operating system default rather than guessed as on or off.
+- **`PTCH-01`** security update currency (taken from `EX.CH-01` rather than re-derived),
+  Emergency Mitigation Service state, and Windows patch cycle.
+- **`DNS-01`** MX, SPF and DMARC for every authoritative accepted domain, including an SPF
+  record ending in a permissive qualifier and a DMARC policy of none.
+
+Two new switches: `-SkipMailboxInventory` and `-SkipDnsQueries`, alongside the existing
+`-SkipDomainQueries`. `Test-Mailflow`, `Get-Message` and performance counters are deliberately
+out of scope; PORT-PLAN records why.
+
+### Changed — 2026-09-01 (failure logging)
+
+A failure is now recorded in enough detail to diagnose without re-running, and it reaches the
+report rather than only the log.
+
+- `Get-ExchErrorDetail` flattens an ErrorRecord into the exception type, message, fully
+  qualified error id, category, target object, script name and line number, the offending
+  source line, the full script stack trace, and the whole inner-exception chain.
+- `Write-ExchError` writes that to `logs/run.jsonl` **and** appends it to the run's error list.
+  Every collector's catch block and every `Invoke-ExchQuery` failure now goes through it.
+- Two new report sections and CSVs: `run.errors` (every failure with its detail) and
+  `run.collectors` (every collector with its status, duration and output). The entry script
+  returns `ErrorsLogged`.
+- A collector that throws produces a finding carrying the error detail and naming the file and
+  line it was thrown from.
+- `Write-ExchLog` retries a locked log file and degrades to a warning rather than failing the
+  run, and falls back to a serialisable form when something in the payload will not convert.
+
+### Fixed — 2026-09-01
+
+- **The run's error list never collected anything.** `Get-ExchRunErrorList` returned the list
+  directly, and PowerShell unrolls a collection on return, so an empty list came back as
+  `$null`. The caller took that to mean there was no list, skipped the `Add`, and left the list
+  empty for the rest of the run - so every failure reached the log and none reached the report.
+  Returning `, $list` prevents the unroll, and a test now guards it.
+- `PF-01` assigned a literal `Compliant` when no public folders were deployed, the same class of
+  hardcoded verdict already removed from `DAG-01`. Whether public folders are expected is now a
+  threshold (`PublicFolder.RequirePublicFolders`), so a client that depends on them gets a
+  failure instead of a pass.
+- `PTCH-01` produced a doubled full stop when embedding the upstream `EX.CH-01` rationale.
+- `TLS-01` passed its protocol list into the remote scriptblock with `-ArgumentList`; it now
+  uses `$using:`, which is idiomatic and satisfies the analyzer's new-runspace scope rule.
+
 ### Added — 2026-09-01 (phase P10, partial)
 
 Three collectors, closing the coverage gaps that were named explicitly: transport settings,

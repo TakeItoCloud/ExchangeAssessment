@@ -268,6 +268,88 @@ statement it says so.
     }
 
     # --------------------------------------------------------------------------------------
+    # Role based access control
+    # https://learn.microsoft.com/exchange/permissions/role-groups
+    # --------------------------------------------------------------------------------------
+    Rbac = @{
+        # Role groups that grant organisation-wide control. Membership beyond the count below
+        # is reported for review - the right number is a client decision, not a fixed rule.
+        PrivilegedRoleGroups = @(
+            'Organization Management'
+            'Recipient Management'
+            'Server Management'
+            'Discovery Management'
+            'Hygiene Management'
+            'Compliance Management'
+        )
+        MaxOrganizationManagementMembers = 5
+        # Management role assignments scoped to the whole organisation and delegated to a
+        # non-standard security group are worth a look.
+        FlagDelegatingAssignments = $true
+    }
+
+    # --------------------------------------------------------------------------------------
+    # Mailbox inventory
+    # --------------------------------------------------------------------------------------
+    Mailbox = @{
+        # Percentage of the send quota at which a mailbox is called out.
+        QuotaWarningPercent = 90
+        # Mailboxes larger than this are reported for review.
+        LargeMailboxGB      = 50
+        # Forwarding to an address outside the organisation is a data-egress path.
+        FlagExternalForwarding = $true
+        # Cap the enumeration so a very large organisation cannot make a run take hours.
+        # 0 means no cap.
+        MaxMailboxes        = 5000
+    }
+
+    # --------------------------------------------------------------------------------------
+    # Retention, holds and audit
+    # --------------------------------------------------------------------------------------
+    Compliance = @{
+        RequireRetentionPolicy      = $true
+        RequireAdminAuditLogging    = $true
+        MinAdminAuditLogAgeDays     = 90
+        RequireMailboxAuditLogging  = $true
+    }
+
+    # --------------------------------------------------------------------------------------
+    # Client access
+    # --------------------------------------------------------------------------------------
+    ClientAccess = @{
+        # An authentication policy that blocks legacy Basic authentication should exist and be
+        # set as the organisation default.
+        RequireAuthenticationPolicy = $true
+        RequireDefaultAuthPolicy    = $true
+        # Protocols that should be off unless a business case exists.
+        DiscouragedProtocols        = @('PopEnabled', 'ImapEnabled')
+        RequireMobileDevicePolicy   = $true
+        # Devices that have not synchronised in this long are stale registrations.
+        StaleDeviceDays             = 90
+    }
+
+    # --------------------------------------------------------------------------------------
+    # Public folders
+    # --------------------------------------------------------------------------------------
+    PublicFolder = @{
+        FlagLegacyPublicFolderDatabase = $true
+        MaxItemsPerFolder              = 10000
+        # Whether this organisation is expected to have public folders at all. Most modern
+        # deployments do not, so the default is to report their absence as a fact. Set this true
+        # for a client whose applications depend on them.
+        RequirePublicFolders           = $false
+    }
+
+    # --------------------------------------------------------------------------------------
+    # Security updates and mitigations
+    # --------------------------------------------------------------------------------------
+    Patch = @{
+        RequireMitigationService = $true
+        # Windows updates older than this suggest the patch cycle has stalled.
+        MaxHotfixAgeDays         = 60
+    }
+
+    # --------------------------------------------------------------------------------------
     # Reporting
     # --------------------------------------------------------------------------------------
     MaxRowsPerSection = 500

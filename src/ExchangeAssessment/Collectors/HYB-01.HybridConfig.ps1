@@ -18,14 +18,14 @@ function Invoke-ExchCollector_HYB_01_HybridConfig {
 
     $errors = New-Object System.Collections.Generic.List[string]
 
-    $hybrid       = @(Invoke-ExchQuery -Label 'Get-HybridConfiguration'       -Errors $errors -Script { Get-HybridConfiguration -ErrorAction Stop })
-    $intraOrg     = @(Invoke-ExchQuery -Label 'Get-IntraOrganizationConnector' -Errors $errors -Script { Get-IntraOrganizationConnector -ErrorAction Stop })
-    $orgConfig    = @(Invoke-ExchQuery -Label 'Get-OrganizationConfig'        -Errors $errors -Script { Get-OrganizationConfig -ErrorAction Stop })
-    $authServers  = @(Invoke-ExchQuery -Label 'Get-AuthServer'                -Errors $errors -Script { Get-AuthServer -ErrorAction Stop })
-    $partnerApps  = @(Invoke-ExchQuery -Label 'Get-PartnerApplication'        -Errors $errors -Script { Get-PartnerApplication -ErrorAction Stop })
-    $federation   = @(Invoke-ExchQuery -Label 'Get-FederationTrust'           -Errors $errors -Script { Get-FederationTrust -ErrorAction Stop })
-    $orgRelations = @(Invoke-ExchQuery -Label 'Get-OrganizationRelationship'  -Errors $errors -Script { Get-OrganizationRelationship -ErrorAction Stop })
-    $migration    = @(Invoke-ExchQuery -Label 'Get-MigrationEndpoint'         -Errors $errors -Script { Get-MigrationEndpoint -ErrorAction Stop })
+    $hybrid       = @(Invoke-ExchQuery -Label 'Get-HybridConfiguration'       -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-HybridConfiguration -ErrorAction Stop })
+    $intraOrg     = @(Invoke-ExchQuery -Label 'Get-IntraOrganizationConnector' -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-IntraOrganizationConnector -ErrorAction Stop })
+    $orgConfig    = @(Invoke-ExchQuery -Label 'Get-OrganizationConfig'        -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-OrganizationConfig -ErrorAction Stop })
+    $authServers  = @(Invoke-ExchQuery -Label 'Get-AuthServer'                -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-AuthServer -ErrorAction Stop })
+    $partnerApps  = @(Invoke-ExchQuery -Label 'Get-PartnerApplication'        -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-PartnerApplication -ErrorAction Stop })
+    $federation   = @(Invoke-ExchQuery -Label 'Get-FederationTrust'           -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-FederationTrust -ErrorAction Stop })
+    $orgRelations = @(Invoke-ExchQuery -Label 'Get-OrganizationRelationship'  -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-OrganizationRelationship -ErrorAction Stop })
+    $migration    = @(Invoke-ExchQuery -Label 'Get-MigrationEndpoint'         -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-MigrationEndpoint -ErrorAction Stop })
 
     $hybridRows = foreach ($h in $hybrid) {
         [pscustomobject]@{

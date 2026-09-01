@@ -19,7 +19,7 @@ function Invoke-ExchCollector_REPL_01_ReplicationHealth {
     $control = Get-ExchControlById -ControlId 'REPL-01'
 
     $errors = New-Object System.Collections.Generic.List[string]
-    $dags = @(Invoke-ExchQuery -Label 'Get-DatabaseAvailabilityGroup' -Errors $errors -Script { Get-DatabaseAvailabilityGroup -ErrorAction Stop })
+    $dags = @(Invoke-ExchQuery -Label 'Get-DatabaseAvailabilityGroup' -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-DatabaseAvailabilityGroup -ErrorAction Stop })
 
     $members = @($dags | ForEach-Object { @($_.Servers) } | ForEach-Object { [string]$_ } | Where-Object { $_ } | Sort-Object -Unique)
 
@@ -28,7 +28,7 @@ function Invoke-ExchCollector_REPL_01_ReplicationHealth {
 
     $replicationRows = New-Object System.Collections.Generic.List[object]
     foreach ($member in $members) {
-        foreach ($check in @(Invoke-ExchQuery -Label ("Test-ReplicationHealth on {0}" -f $member) -Errors $errors -Script { Test-ReplicationHealth -Identity $member -ErrorAction Stop })) {
+        foreach ($check in @(Invoke-ExchQuery -Label ("Test-ReplicationHealth on {0}" -f $member) -Errors $errors -Run $Run -ControlId $control.controlId -Script { Test-ReplicationHealth -Identity $member -ErrorAction Stop })) {
             $checkName = [string]$check.Check
             if ($ignored -contains $checkName) { continue }
             $result = [string]$check.Result
@@ -43,9 +43,9 @@ function Invoke-ExchCollector_REPL_01_ReplicationHealth {
     }
 
     $mapiRows = New-Object System.Collections.Generic.List[object]
-    foreach ($db in @(Invoke-ExchQuery -Label 'Get-MailboxDatabase' -Errors $errors -Script { Get-MailboxDatabase -Status -ErrorAction Stop })) {
+    foreach ($db in @(Invoke-ExchQuery -Label 'Get-MailboxDatabase' -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-MailboxDatabase -Status -ErrorAction Stop })) {
         if (-not $db.Mounted) { continue }
-        foreach ($result in @(Invoke-ExchQuery -Label ("Test-MAPIConnectivity on {0}" -f $db.Name) -Errors $errors -Script { Test-MAPIConnectivity -Database $db.Identity -ErrorAction Stop })) {
+        foreach ($result in @(Invoke-ExchQuery -Label ("Test-MAPIConnectivity on {0}" -f $db.Name) -Errors $errors -Run $Run -ControlId $control.controlId -Script { Test-MAPIConnectivity -Database $db.Identity -ErrorAction Stop })) {
             $mapiRows.Add([pscustomobject]@{
                 Database = [string]$db.Name
                 Server   = [string]$result.Server

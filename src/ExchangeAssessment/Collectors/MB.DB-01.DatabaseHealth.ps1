@@ -18,7 +18,7 @@ function Invoke-ExchCollector_MB_DB_01_DatabaseHealth {
     try { $databases = @(Get-MailboxDatabase -Status -ErrorAction Stop) }
     catch {
         $reason = "Get-MailboxDatabase failed, so no database was assessed: $($_.Exception.Message)"
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'Get-MailboxDatabase failed' -Data @{ error = $_.Exception.Message }
+        $null = Write-ExchError -Run $Run -Context 'Get-MailboxDatabase' -ErrorRecord $_ -ControlId $control.controlId
         return New-ExchCollectorResult -Findings @(
             New-ExchUnavailableFinding -Control $control -Reason $reason `
                 -Remediation 'Run from an Exchange Management Shell with rights to query mailbox databases.'
@@ -95,6 +95,7 @@ function Invoke-ExchCollector_MB_DB_01_DatabaseHealth {
         }
         catch {
             $copyReadErrors.Add(("{0}: {1}" -f $db.Name, $_.Exception.Message)) | Out-Null
+            $null = Write-ExchError -Run $Run -Context ('Get-MailboxDatabaseCopyStatus on {0}' -f $db.Name) -ErrorRecord $_ -ControlId $control.controlId -Severity 'Warning'
         }
     }
 

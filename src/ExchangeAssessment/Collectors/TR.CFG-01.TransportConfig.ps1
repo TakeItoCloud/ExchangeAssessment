@@ -17,11 +17,11 @@ function Invoke-ExchCollector_TR_CFG_01_TransportConfig {
 
     $errors = New-Object System.Collections.Generic.List[string]
 
-    $config    = @(Invoke-ExchQuery -Label 'Get-TransportConfig'           -Errors $errors -Script { Get-TransportConfig -ErrorAction Stop }) | Select-Object -First 1
-    $services  = @(Invoke-ExchQuery -Label 'Get-TransportService'          -Errors $errors -Script { Get-TransportService -ErrorAction Stop })
-    $frontend  = @(Invoke-ExchQuery -Label 'Get-FrontendTransportService'  -Errors $errors -Script { Get-FrontendTransportService -ErrorAction Stop })
-    $rules     = @(Invoke-ExchQuery -Label 'Get-TransportRule'             -Errors $errors -Script { Get-TransportRule -ErrorAction Stop })
-    $journal   = @(Invoke-ExchQuery -Label 'Get-JournalRule'               -Errors $errors -Script { Get-JournalRule -ErrorAction Stop })
+    $config    = @(Invoke-ExchQuery -Label 'Get-TransportConfig'           -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-TransportConfig -ErrorAction Stop }) | Select-Object -First 1
+    $services  = @(Invoke-ExchQuery -Label 'Get-TransportService'          -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-TransportService -ErrorAction Stop })
+    $frontend  = @(Invoke-ExchQuery -Label 'Get-FrontendTransportService'  -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-FrontendTransportService -ErrorAction Stop })
+    $rules     = @(Invoke-ExchQuery -Label 'Get-TransportRule'             -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-TransportRule -ErrorAction Stop })
+    $journal   = @(Invoke-ExchQuery -Label 'Get-JournalRule'               -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-JournalRule -ErrorAction Stop })
 
     if ($null -eq $config) {
         return New-ExchCollectorResult -Findings @(

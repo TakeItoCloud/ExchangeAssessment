@@ -13,6 +13,10 @@ param(
     [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$TenantHint,
     [Parameter()][ValidateNotNullOrEmpty()][string]$OutputRoot = (Join-Path $PSScriptRoot '..\output'),
     [Parameter()][switch]$SkipDomainQueries,
+    # Skip the mailbox inventory, the one collector whose cost scales with the organisation.
+    [Parameter()][switch]$SkipMailboxInventory,
+    # Skip the external DNS lookups.
+    [Parameter()][switch]$SkipDnsQueries,
     # A .psd1 whose keys override Config/Thresholds.psd1 for this client.
     [Parameter()][string]$ConfigPath,
     # Put every inventory row in assessment.json instead of summarising the large sections.
@@ -43,6 +47,7 @@ try {
     }
     catch {
         Write-Warning ("Preflight check failed: {0}" -f $_.Exception.Message)
+        $null = Write-ExchError -Run $run -Context 'Preflight check' -ErrorRecord $_ -Severity 'Warning'
     }
 
     Write-ExchEvent -Run $run -Level INFO -Message 'Invoke-ExchAssess started' -Data @{
@@ -52,11 +57,14 @@ try {
         host          = $env:COMPUTERNAME
         user          = $env:USERNAME
         skipDomain    = [bool]$SkipDomainQueries.IsPresent
+        skipMailboxes = [bool]$SkipMailboxInventory.IsPresent
+        skipDns       = [bool]$SkipDnsQueries.IsPresent
         fullInventory = [bool]$FullInventory.IsPresent
         includeCloud  = [bool]$IncludeExchangeOnline.IsPresent
     }
 
-    $collection = Invoke-ExchCollection -Run $run -SkipDomainQueries:$SkipDomainQueries
+    $collection = Invoke-ExchCollection -Run $run -SkipDomainQueries:$SkipDomainQueries `
+        -SkipMailboxInventory:$SkipMailboxInventory -SkipDnsQueries:$SkipDnsQueries
 
     # Reports first, so the hash manifest covers them.
     $findingsPath = Save-ExchFindings -Run $run -Findings @($collection.Findings)
@@ -74,6 +82,7 @@ try {
         CollectorsRun     = @($collection.Ran).Count
         CollectorsSkipped = @($collection.Skipped).Count
         CollectorsFailed  = @($collection.Failed).Count
+        ErrorsLogged      = @($collection.Errors).Count
         FindingsPath      = $findingsPath
         AssessmentJson    = $jsonPath
         CsvFolder         = (Join-Path $run.RunFolder 'csv')
@@ -86,7 +95,7 @@ try {
 catch {
     if ($run) {
         try {
-            Write-ExchEvent -Run $run -Level ERROR -Message 'Invoke-ExchAssess failed' -Data @{ error = $_.Exception.Message; stack = $_.ScriptStackTrace }
+            $null = Write-ExchError -Run $run -Context 'Invoke-ExchAssess' -ErrorRecord $_
             Close-ExchRun -Run $run | Out-Null
         }
         catch {

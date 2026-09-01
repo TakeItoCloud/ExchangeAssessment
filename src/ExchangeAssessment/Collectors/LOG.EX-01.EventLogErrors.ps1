@@ -33,6 +33,7 @@ function Invoke-ExchCollector_LOG_EX_01_EventLogErrors {
         # Get-WinEvent throws when the filter matches nothing, which is a clean result, not a failure.
         if ($_.Exception.Message -match 'No events were found') { $events = @() }
         else {
+            $null = Write-ExchError -Run $Run -Context 'Get-WinEvent Application/System' -ErrorRecord $_ -ControlId $control.controlId
             $reason = "The Application and System event logs could not be queried on $($env:COMPUTERNAME): $($_.Exception.Message)"
             return New-ExchCollectorResult -Findings @(
                 New-ExchUnavailableFinding -Control $control -Reason $reason -DataSource 'Events' `

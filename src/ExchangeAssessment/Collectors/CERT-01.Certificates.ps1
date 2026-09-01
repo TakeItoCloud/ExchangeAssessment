@@ -74,6 +74,7 @@ function Invoke-ExchCollector_CERT_01_Certificates {
         }
         catch {
             $readErrors.Add(("{0}: {1}" -f $(if ($server) { $server } else { 'current session' }), $_.Exception.Message)) | Out-Null
+            $null = Write-ExchError -Run $Run -Context ('Get-ExchangeCertificate on {0}' -f $(if ($server) { $server } else { 'current session' })) -ErrorRecord $_ -ControlId $control.controlId -Severity 'Warning'
         }
     }
 

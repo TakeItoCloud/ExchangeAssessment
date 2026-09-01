@@ -57,7 +57,7 @@ function Invoke-ExchCollector_SRV_01_ServerInventory {
             CustomerFeedbackEnabled = (ConvertTo-ExchFlatValue -Value $srv.CustomerFeedbackEnabled)
         }) | Out-Null
 
-        foreach ($health in @(Invoke-ExchQuery -Label ("Test-ServiceHealth on {0}" -f $name) -Errors $errors -Script { Test-ServiceHealth -Server $name -ErrorAction Stop })) {
+        foreach ($health in @(Invoke-ExchQuery -Label ("Test-ServiceHealth on {0}" -f $name) -Errors $errors -Run $Run -ControlId $control.controlId -Script { Test-ServiceHealth -Server $name -ErrorAction Stop })) {
             $notRunning = @($health.ServicesNotRunning)
             $serviceRows.Add([pscustomobject]@{
                 Server              = $name
@@ -69,7 +69,7 @@ function Invoke-ExchCollector_SRV_01_ServerInventory {
             }) | Out-Null
         }
 
-        foreach ($component in @(Invoke-ExchQuery -Label ("Get-ServerComponentState on {0}" -f $name) -Errors $errors -Script { Get-ServerComponentState -Identity $name -ErrorAction Stop })) {
+        foreach ($component in @(Invoke-ExchQuery -Label ("Get-ServerComponentState on {0}" -f $name) -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-ServerComponentState -Identity $name -ErrorAction Stop })) {
             $componentName = [string]$component.Component
             if ($ignoredComponents -contains $componentName) { continue }
             $state = [string]$component.State

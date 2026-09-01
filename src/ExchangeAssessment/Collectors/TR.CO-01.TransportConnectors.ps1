@@ -21,14 +21,21 @@ function Invoke-ExchCollector_TR_CO_01_TransportConnectors {
     $receive = @()
 
     try { $send = @(Get-SendConnector -ErrorAction Stop) }
-    catch { $sendErr = [string]$_.Exception.Message }
+    catch {
+        $sendErr = [string]$_.Exception.Message
+        $null = Write-ExchError -Run $Run -Context 'Get-SendConnector' -ErrorRecord $_ -ControlId $control.controlId -Severity 'Warning'
+    }
 
     try { $receive = @(Get-ReceiveConnector -ErrorAction Stop) }
-    catch { $recvErr = [string]$_.Exception.Message }
+    catch {
+        $recvErr = [string]$_.Exception.Message
+        $null = Write-ExchError -Run $Run -Context 'Get-ReceiveConnector' -ErrorRecord $_ -ControlId $control.controlId -Severity 'Warning'
+    }
 
     if ($sendErr -and $recvErr) {
         $reason = "Neither send nor receive connectors could be read. Send: $sendErr. Receive: $recvErr."
         Write-ExchEvent -Run $Run -Level ERROR -Message 'Connector queries failed' -Data @{ sendError = $sendErr; receiveError = $recvErr }
+        # Both queries already recorded their own detail below; this line names the combined failure.
         return New-ExchCollectorResult -Findings @(
             New-ExchUnavailableFinding -Control $control -Reason $reason `
                 -Remediation 'Run from an Exchange Management Shell with rights to read transport connectors.'
