@@ -338,7 +338,12 @@ Describe 'ExchangeAssessment' {
         It 'returns the run error list even when it is still empty' {
             $run = [pscustomobject]@{ Errors = (New-Object System.Collections.Generic.List[object]) }
             $list = & (Get-Module $script:ModuleName) { param($r) Get-ExchRunErrorList -Run $r } $run
-            $list | Should -Not -BeNullOrEmpty -Because 'an empty list must not unroll to $null'
+
+            # Deliberately not `$list | Should -Not -BeNullOrEmpty`: piping an empty collection
+            # into Should enumerates it to nothing, and -BeNullOrEmpty counts an empty collection
+            # as empty, so that assertion cannot tell "returned an empty list" from "returned
+            # null" - which is precisely the distinction this test exists to make.
+            ($null -eq $list) | Should -BeFalse -Because 'an empty list must not unroll to $null'
             $list.GetType().Name | Should -Be 'List`1'
         }
     }

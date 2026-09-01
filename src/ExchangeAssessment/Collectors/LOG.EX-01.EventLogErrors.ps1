@@ -43,25 +43,27 @@ function Invoke-ExchCollector_LOG_EX_01_EventLogErrors {
     }
 
     $matched = New-Object System.Collections.Generic.List[object]
-    foreach ($event in $events) {
-        $provider = [string]$event.ProviderName
+    # Not $event: that is a PowerShell automatic variable, and assigning to it is both a lint
+    # failure and a real hazard inside an event-handling scope.
+    foreach ($logEntry in $events) {
+        $provider = [string]$logEntry.ProviderName
         $isExchange = $false
         foreach ($pattern in $providers) {
             if ($provider -like $pattern) { $isExchange = $true; break }
         }
         if (-not $isExchange) { continue }
 
-        $message = [string]$event.Message
+        $message = [string]$logEntry.Message
         if ($message.Length -gt 1024) { $message = $message.Substring(0, 1024) }
 
         $matched.Add([pscustomobject]@{
-            TimeCreated = $event.TimeCreated
-            Level       = [string]$event.LevelDisplayName
-            EventId     = [int]$event.Id
+            TimeCreated = $logEntry.TimeCreated
+            Level       = [string]$logEntry.LevelDisplayName
+            EventId     = [int]$logEntry.Id
             Provider    = $provider
-            Log         = [string]$event.LogName
-            Machine     = [string]$event.MachineName
-            IsKnownNoise= ($noiseIds -contains [int]$event.Id)
+            Log         = [string]$logEntry.LogName
+            Machine     = [string]$logEntry.MachineName
+            IsKnownNoise= ($noiseIds -contains [int]$logEntry.Id)
             Message     = $message
         }) | Out-Null
     }
