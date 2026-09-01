@@ -5,25 +5,29 @@
     # ...but only fail on findings that actually matter for a shipped tool.
     Severity            = @('Error', 'Warning')
 
-    # Rules suspended for the code inherited from infra-scripting-suite. Each is a real
-    # backlog row in PORT-PLAN.md (phase P2), not a permanent waiver.
-    #   PSAvoidUsingEmptyCatchBlock 19 hits - collectors swallow per-control failures, so a
-    #                               control that could not be evaluated is indistinguishable
-    #                               from one that passed. The findings model already has
-    #                               'Unknown' / 'HardFail' outcomes for exactly this; the
-    #                               catches need to use them.
-    #   PSUseSingularNouns           7 hits - e.g. Get-ExchAcceptedDomains,
-    #                               Get-ExchVirtualDirectories. Internal to the module.
+    # Two rules stay suppressed. Both are cosmetic here, and both are wrong for this codebase
+    # rather than work that is merely outstanding - so unlike the pair that used to sit
+    # alongside them, they are not a backlog row waiting to be cleared.
+    #
+    #   PSUseSingularNouns   7 hits - six are collector functions whose name encodes the control
+    #                        they implement (Invoke-ExchCollector_CERT_01_Certificates), and the
+    #                        seventh is Save-ExchFindings, which genuinely saves all of them.
+    #                        Renaming any of these would make the name less accurate, not more.
     #   PSUseShouldProcessForStateChangingFunctions
-    #                                3 hits - New-*/Save-*/Export-* write to the run folder.
-    #                               The assessment is read-only against Exchange.
-    #   PSUseApprovedVerbs           2 hits - Ensure-ExchLocalShell, Ensure-ExchADModule,
-    #                               both private.
+    #                        8 hits - all on New-* factory functions. New-ExchFinding,
+    #                        New-ExchInventorySection and New-ExchCollectorResult build in-memory
+    #                        objects and change nothing at all; New-ExchRun and
+    #                        New-ExchAssessmentJson write only inside the run folder. The
+    #                        assessment is read-only against Exchange and Active Directory, which
+    #                        is enforced by the read-only cmdlet test in the Pester suite rather
+    #                        than by this rule.
+    #
+    # PSAvoidUsingEmptyCatchBlock and PSUseApprovedVerbs were suppressed here until the
+    # collectors were reworked. Both are clean now and the suppressions are gone, so a silently
+    # swallowed failure fails the build.
     ExcludeRules        = @(
-        'PSAvoidUsingEmptyCatchBlock'
         'PSUseSingularNouns'
         'PSUseShouldProcessForStateChangingFunctions'
-        'PSUseApprovedVerbs'
     )
 
     # Rules this tool relies on, named explicitly so they survive future changes to the
@@ -32,6 +36,7 @@
         PSAvoidUsingWriteHost                 = @{ Enable = $true }
         PSUseDeclaredVarsMoreThanAssignments  = @{ Enable = $true }
         PSPossibleIncorrectComparisonWithNull = @{ Enable = $true }
+        PSAvoidUsingEmptyCatchBlock           = @{ Enable = $true }
 
         # The module runs inside the Exchange Management Shell, which is Windows PowerShell.
         PSUseCompatibleSyntax                 = @{

@@ -1,136 +1,120 @@
 <#
-UPG-01 - Exchange Subscription Edition readiness (roll-up).
+UPG-01 - Exchange Server Subscription Edition readiness roll-up.
+
+Reads the conclusions the environment collectors already reached rather than re-testing the
+same thresholds a second time. Where an upstream control could not be evaluated, readiness for
+that prerequisite is reported as unknown - a missing signal is never counted as a pass.
 #>
 
 Set-StrictMode -Version Latest
 
 function Invoke-ExchCollector_UPG_01_SEReadiness {
-    # $Run is part of the collector calling convention; this roll-up derives everything from
-    # the findings it is handed and does not log through the run itself.
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'Run')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateNotNull()]$Run,
-        [Parameter()][object]$DomainFinding,
-        [Parameter()][object]$OsFinding,
-        [Parameter()][object]$ExchangeFinding
+        [Parameter()][hashtable]$Upstream = @{}
     )
 
+    $ErrorActionPreference = 'Stop'
     $control = Get-ExchControlById -ControlId 'UPG-01'
 
-    $domainMetrics = $null; $domainEvidence=@()
-    try { $domainMetrics = $DomainFinding.result.metrics; $domainEvidence = @($DomainFinding.evidence) } catch {}
+    $prerequisites = @(
+        @{ Key = 'ENV.VERS-01'; Name = 'Active Directory functional levels and Exchange preparation' }
+        @{ Key = 'ENV.OS-01';   Name = 'Supported server operating system' }
+        @{ Key = 'EX.CH-01';    Name = 'Supported Exchange product version and build' }
+    )
 
-    $osMetrics = $null; $osEvidence=@()
-    try { $osMetrics = $OsFinding.result.metrics; $osEvidence = @($OsFinding.evidence) } catch {}
+    $rows = New-Object System.Collections.Generic.List[object]
+    $outcomes = New-Object System.Collections.Generic.List[string]
+    $blockers = New-Object System.Collections.Generic.List[string]
+    $missing = New-Object System.Collections.Generic.List[string]
 
-    $exchMetrics = $null; $exchEvidence=@()
-    try { $exchMetrics = $ExchangeFinding.result.metrics; $exchEvidence = @($ExchangeFinding.evidence) } catch {}
+    foreach ($prereq in $prerequisites) {
+        $finding = Get-ExchUpstreamFinding -Upstream $Upstream -ControlId $prereq.Key
 
-    $issues = New-Object System.Collections.Generic.List[string]
-
-    # Domain readiness
-    $domainReady = $null
-    try {
-        $forestMode = $domainMetrics.forestMode
-        $domainMode = $domainMetrics.domainMode
-        $schemaVersion = $domainMetrics.schemaVersion
-        if ($forestMode -and $domainMode -and $null -ne $schemaVersion) {
-            $domainReady = ($forestMode -match '2016|2019|2022') -and ($domainMode -match '2016|2019|2022') -and ([int]$schemaVersion -ge 87)
-            if (-not $domainReady) { $issues.Add('Raise forest/domain level to 2016+ and update Exchange schema.') | Out-Null }
+        if ($null -eq $finding) {
+            $missing.Add($prereq.Name) | Out-Null
+            $outcomes.Add('Unknown') | Out-Null
+            $rows.Add([pscustomobject]@{
+                Prerequisite = $prereq.Name
+                ControlId    = $prereq.Key
+                Outcome      = 'Unknown'
+                Severity     = ''
+                Detail       = 'The upstream control did not report, so this prerequisite was not assessed.'
+            }) | Out-Null
+            continue
         }
-    } catch { }
 
-    # OS readiness (Windows Server 2022 preferred)
-    $osReady = $null
-    try {
-        $servers = @($osMetrics.servers)
-        if ($servers.Count -gt 0) {
-            $pref2022 = [version]'10.0.20348'
-            $min2016 = [version]'10.0.14393'
-            $unsupported = $servers | Where-Object { $_.version -and ([version]$_.version -lt $min2016) }
-            $below2022 = $servers | Where-Object { $_.version -and ([version]$_.version -lt $pref2022) }
-            if ($unsupported.Count -gt 0) {
-                $osReady = $false
-                $issues.Add('One or more Exchange servers are below Windows Server 2016.') | Out-Null
-            }
-            elseif ($below2022.Count -gt 0) {
-                $osReady = $false
-                $issues.Add('Upgrade Exchange server OS to Windows Server 2022 for SE readiness.') | Out-Null
-            }
-            else {
-                $osReady = $true
-            }
-        }
-    } catch { }
+        $outcome = [string]$finding.result.outcome
+        $outcomes.Add($outcome) | Out-Null
+        if ($outcome -eq 'NonCompliant') { $blockers.Add($prereq.Name) | Out-Null }
 
-    # Exchange build readiness
-    $exchReady = $null
-    try {
-        $servers = @($exchMetrics.servers)
-        if ($servers.Count -gt 0) {
-            $hasLegacy = $servers | Where-Object { $_.major -lt 15 }
-            $has2016 = $servers | Where-Object { $_.major -eq 15 -and $_.minor -lt 2 }
-            if ($hasLegacy.Count -gt 0) {
-                $exchReady = $false
-                $issues.Add('Upgrade legacy Exchange versions to supported builds.') | Out-Null
-            }
-            elseif ($has2016.Count -gt 0) {
-                $exchReady = $false
-                $issues.Add('Move from Exchange 2016 to Exchange 2019 CU (latest or -1).') | Out-Null
-            }
-            else {
-                $exchReady = $true
-            }
-        }
-    } catch { }
-
-    $missing = @()
-    if ($null -eq $domainReady) { $missing += 'Domain/forest/schema' }
-    if ($null -eq $osReady) { $missing += 'OS' }
-    if ($null -eq $exchReady) { $missing += 'Exchange build' }
-
-    $outcome = 'Unknown'
-    $sev = 'High'
-    $suff = if ($missing.Count -gt 0) { 'SoftFail' } else { 'Pass' }
-    $rat = ''
-
-    if ($missing.Count -gt 0) {
-        $outcome = 'Unknown'
-        $rat = 'Missing signals: ' + ($missing -join ', ')
-    }
-    elseif ($issues.Count -gt 0) {
-        $outcome = 'NonCompliant'
-        $rat = $issues -join ' '
-    }
-    else {
-        $outcome = 'Compliant'
-        $sev = 'Medium'
-        $rat = 'Domain/forest schema, OS, and Exchange versions align to SE prerequisites.'
+        $rows.Add([pscustomobject]@{
+            Prerequisite = $prereq.Name
+            ControlId    = $prereq.Key
+            Outcome      = $outcome
+            Severity     = [string]$finding.severity
+            Detail       = [string]$finding.result.rationale
+        }) | Out-Null
     }
 
-    $evidence = @()
-    $evidence += $domainEvidence
-    $evidence += $osEvidence
-    $evidence += $exchEvidence
+    $rowArr = @($rows.ToArray())
+    $evidence = Write-ExchEvidenceFile -Run $Run -RelativePath 'upgrade/se-readiness.json' -ContentObject $rowArr
 
-    return New-ExchFinding `
-        -ControlDomain $control.domain `
-        -ControlId $control.controlId `
-        -Severity $sev `
-        -Title $control.title `
-        -Description $control.target `
-        -Evidence $evidence `
-        -Remediation 'Ensure domain/forest functional level is 2016+, schema updated, Exchange servers on supported Exchange 2019 CU and Windows Server 2022.' `
-        -FrameworkMappings $control.mappings `
-        -Outcome $outcome `
-        -Sufficiency $suff `
-        -Rationale $rat `
+    $sections = @(
+        New-ExchInventorySection -Run $Run -Key 'upgrade.se-readiness' -Title 'Exchange SE Readiness' -Area 'Upgrade' `
+            -Columns @('Prerequisite', 'ControlId', 'Outcome', 'Severity', 'Detail') `
+            -Rows $rowArr
+    )
+
+    $outcome = Get-ExchWorstOutcome -Outcomes $outcomes.ToArray()
+    $severity = switch ($outcome) {
+        'NonCompliant'       { 'High' }
+        'PartiallyCompliant' { 'Medium' }
+        'Unknown'            { 'Medium' }
+        default              { 'Low' }
+    }
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    if ($blockers.Count -gt 0) { $parts.Add(("Blocked on: {0}" -f ($blockers -join ', '))) | Out-Null }
+    if ($missing.Count -gt 0)  { $parts.Add(("Not assessed: {0}" -f ($missing -join ', '))) | Out-Null }
+
+    $partial = @($rowArr | Where-Object { $_.Outcome -eq 'PartiallyCompliant' })
+    if ($partial.Count -gt 0) {
+        $parts.Add(("Needs work before upgrade: {0}" -f (($partial | ForEach-Object { $_.Prerequisite }) -join ', '))) | Out-Null
+    }
+
+    $rationale = if ($parts.Count -gt 0) { ($parts -join '. ') + '.' }
+                 else { 'All assessed prerequisites for Exchange Server Subscription Edition are met.' }
+
+    $finding = New-ExchControlFinding -Control $control -Severity $severity -Outcome $outcome `
+        -Sufficiency $(if ($missing.Count -gt 0) { 'SoftFail' } else { 'Pass' }) `
+        -Rationale $rationale `
+        -Evidence @($evidence) `
+        -Remediation 'Clear each failing prerequisite in its own control before planning the Exchange SE upgrade. An in-place upgrade is supported only from Exchange 2019 CU14 or CU15; from Exchange 2016 a legacy side-by-side upgrade is required.' `
         -Metrics @{
-            domainReady  = $domainReady
-            osReady      = $osReady
-            exchangeReady= $exchReady
-            missingSignals = $missing
+            prerequisites = $rowArr.Count
+            blockers      = @($blockers.ToArray())
+            notAssessed   = @($missing.ToArray())
         } `
-        -Meta @{ dataSources = @{ rollup = @{ state= if($missing.Count -gt 0){'Partial'} else {'Success'} ; reason = if($missing.Count -gt 0){'Missing prerequisite signals'} else {''} } }; evaluationStatus = 'Complete' }
+        -Meta @{ dataSources = @{ Collectors = @{ state = $(if ($missing.Count -gt 0) { 'Partial' } else { 'Success' }); reason = ($missing -join '; ') } }; evaluationStatus = 'Complete' }
+
+    return New-ExchCollectorResult -Sections $sections -Findings @($finding)
+}
+
+function Get-ExchUpstreamFinding {
+    <#
+    Pulls the single finding a prerequisite collector produced out of the upstream results.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()][hashtable]$Upstream = @{},
+        [Parameter(Mandatory)][string]$ControlId
+    )
+
+    if (-not $Upstream -or -not $Upstream.ContainsKey($ControlId)) { return $null }
+    $result = $Upstream[$ControlId]
+    if ($null -eq $result) { return $null }
+
+    return @($result.findings | Where-Object { $_.controlId -eq $ControlId }) | Select-Object -First 1
 }

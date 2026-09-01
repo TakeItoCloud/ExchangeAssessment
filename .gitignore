@@ -26,3 +26,6 @@ Desktop.ini
 $RECYCLE.BIN/
 .DS_Store
 ._*
+
+# Pester -CI writes its NUnit report to the repository root.
+testResults.xml

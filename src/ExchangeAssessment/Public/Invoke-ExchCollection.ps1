@@ -1,148 +1,190 @@
 <#
-Dispatcher for Exchange Assessment collectors (phase 1-2 set).
+Runs the collectors named in the registry, in dependency order.
+
+Returns everything the reports need: the inventory sections, the findings, and an honest record
+of which collectors ran, which were skipped and which failed. A collector that throws does not
+stop the run, but it is never silently lost either - the full error detail goes to the log, and
+the control becomes an Unknown/HardFail finding naming the failure, so a gap in the assessment
+is visible in the output rather than only in the log.
+
+Two sections are added by the run itself: one row per collector with its status and duration,
+and one row per error recorded anywhere in the run.
 #>
 
 function Invoke-ExchCollection {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateNotNull()]$Run,
-        [Parameter()][switch]$SkipDomainQueries
+        [Parameter()][switch]$SkipDomainQueries,
+        # Mailbox inventory enumerates every mailbox, which is the one collector whose cost
+        # scales with the size of the organisation.
+        [Parameter()][switch]$SkipMailboxInventory,
+        # DNS lookups leave the network. Some assessments are run where that is not allowed.
+        [Parameter()][switch]$SkipDnsQueries
     )
 
     Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
 
     $findings = New-Object System.Collections.Generic.List[object]
-    $domainFinding = $null
-    $osFinding = $null
-    $exchFinding = $null
+    $sections = New-Object System.Collections.Generic.List[object]
+    $ran      = New-Object System.Collections.Generic.List[string]
+    $skipped  = New-Object System.Collections.Generic.List[string]
+    $failed   = New-Object System.Collections.Generic.List[object]
+    $status   = New-Object System.Collections.Generic.List[object]
+    $results  = @{}
 
-    try { Ensure-ExchLocalShell -Run $Run } catch { Write-ExchEvent -Run $Run -Level ERROR -Message 'Exchange cmdlets unavailable' -Data @{ error = $_.Exception.Message } }
-
-    if ($SkipDomainQueries) {
-        Write-ExchEvent -Run $Run -Level WARN -Message 'Skipping domain/forest/schema collector' -Data @{}
+    $skipFlags = @{
+        SkipDomainQueries    = [bool]$SkipDomainQueries.IsPresent
+        SkipMailboxInventory = [bool]$SkipMailboxInventory.IsPresent
+        SkipDnsQueries       = [bool]$SkipDnsQueries.IsPresent
     }
-    else {
+    $includeCloud = Get-ExchRunFlag -Run $Run -Name 'IncludeExchangeOnline'
+
+    try { Assert-ExchLocalShell -Run $Run }
+    catch { $null = Write-ExchError -Run $Run -Context 'Exchange Management Shell detection' -ErrorRecord $_ }
+
+    $registry = Get-ExchCollectorOrder
+    Write-ExchEvent -Run $Run -Level INFO -Message 'Collection started' -Data @{ collectors = @($registry).Count }
+
+    # Connect to the tenant once, before any cloud collector runs. A failure here is reported by
+    # each cloud control rather than stopping the on-premises assessment.
+    $cloudConnected = $false
+    if ($includeCloud) {
+        $Run.Cloud = Connect-ExchOnlineSession -Run $Run
+        $cloudConnected = [bool]$Run.Cloud.Connected
+    }
+
+    foreach ($entry in $registry) {
+
+        if ($entry.SkipFlag -and $skipFlags.ContainsKey($entry.SkipFlag) -and $skipFlags[$entry.SkipFlag]) {
+            $skipped.Add($entry.Id) | Out-Null
+            $status.Add((New-ExchCollectorStatusRow -Entry $entry -Status 'Skipped' -Detail $entry.SkipFlag)) | Out-Null
+            Write-ExchEvent -Run $Run -Level WARN -Message 'Collector skipped' -Data @{ controlId = $entry.Id; reason = $entry.SkipFlag }
+            continue
+        }
+
+        if ($entry.Cloud -and -not $includeCloud) {
+            $skipped.Add($entry.Id) | Out-Null
+            $status.Add((New-ExchCollectorStatusRow -Entry $entry -Status 'Skipped' -Detail 'Exchange Online not requested')) | Out-Null
+            Write-ExchEvent -Run $Run -Level INFO -Message 'Collector skipped' -Data @{ controlId = $entry.Id; reason = 'Exchange Online not requested' }
+            continue
+        }
+
+        $started = Get-Date
+        Write-ExchEvent -Run $Run -Level DEBUG -Message 'Collector started' -Data @{ controlId = $entry.Id; function = $entry.Function }
+
         try {
-            $domainFinding = Invoke-ExchCollector_ENV_VERS_01_DomainForestSchema -Run $Run
-            if ($domainFinding) { $findings.Add($domainFinding) | Out-Null }
+            $arguments = @{ Run = $Run }
+            if (@($entry.Requires).Count -gt 0) {
+                $upstream = @{}
+                foreach ($req in @($entry.Requires)) {
+                    if ($results.ContainsKey($req)) { $upstream[$req] = $results[$req] }
+                }
+                $arguments['Upstream'] = $upstream
+            }
+
+            $raw = & $entry.Function @arguments
+            $result = ConvertTo-ExchCollectorResult -InputObject $raw
+
+            $results[$entry.Id] = $result
+            foreach ($s in $result.sections) { $sections.Add($s) | Out-Null }
+            foreach ($f in $result.findings) { $findings.Add($f) | Out-Null }
+            $ran.Add($entry.Id) | Out-Null
+
+            $seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 2)
+            $status.Add((New-ExchCollectorStatusRow -Entry $entry -Status 'Ran' -Seconds $seconds `
+                -Detail ("{0} sections, {1} findings" -f @($result.sections).Count, @($result.findings).Count))) | Out-Null
+
+            Write-ExchEvent -Run $Run -Level INFO -Message 'Collector finished' -Data @{
+                controlId = $entry.Id
+                seconds   = $seconds
+                sections  = @($result.sections).Count
+                findings  = @($result.findings).Count
+            }
         }
         catch {
-            Write-ExchEvent -Run $Run -Level ERROR -Message 'ENV.VERS-01 collector failed' -Data @{ error=$_.Exception.Message }
+            $seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 2)
+            $record = Write-ExchError -Run $Run -Context ("{0} collector" -f $entry.Id) -ErrorRecord $_ -ControlId $entry.Id `
+                -Data @{ function = $entry.Function; seconds = $seconds }
+
+            $message = [string]$_.Exception.Message
+            $failed.Add([pscustomobject]@{ controlId = $entry.Id; error = $message }) | Out-Null
+            $status.Add((New-ExchCollectorStatusRow -Entry $entry -Status 'Failed' -Seconds $seconds -Detail $message)) | Out-Null
+
+            # A collector that fell over is a gap in the assessment, and the report has to say so.
+            $findings.Add((New-ExchCollectorFailureFinding -ControlId $entry.Id -Area $entry.Area -Message $message -Detail $record.detail)) | Out-Null
         }
     }
 
-    try {
-        $osFinding = Invoke-ExchCollector_ENV_OS_01_ExchangeOS -Run $Run
-        if ($osFinding) { $findings.Add($osFinding) | Out-Null }
-    }
-    catch {
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'ENV.OS-01 collector failed' -Data @{ error=$_.Exception.Message }
+    $statusArr = @($status.ToArray())
+    $sections.Add((New-ExchInventorySection -Run $Run -Key 'run.collectors' -Title 'Collector Run Status' -Area 'Run' `
+        -Columns @('ControlId', 'Area', 'Status', 'Seconds', 'Detail') -Rows $statusArr)) | Out-Null
+
+    $errorRows = @(Get-ExchRunErrorRow -Run $Run)
+    $sections.Add((New-ExchInventorySection -Run $Run -Key 'run.errors' -Title 'Errors Recorded During the Run' -Area 'Run' `
+        -Columns @('TimestampUtc', 'ControlId', 'Context', 'Severity', 'ExceptionType', 'Message', 'ScriptName', 'LineNumber', 'FullyQualifiedErrorId', 'InnerExceptions') `
+        -Rows $errorRows -HighCardinality)) | Out-Null
+
+    if ($cloudConnected) { Disconnect-ExchOnlineSession -Run $Run }
+
+    Write-ExchEvent -Run $Run -Level INFO -Message 'Collection finished' -Data @{
+        ran = $ran.Count; skipped = $skipped.Count; failed = $failed.Count; errors = @($errorRows).Count
     }
 
-    try {
-        $exchFinding = Invoke-ExchCollector_EX_CH_01_ExchangeVersionCU -Run $Run
-        if ($exchFinding) { $findings.Add($exchFinding) | Out-Null }
+    [pscustomobject]@{
+        Findings = $findings.ToArray()
+        Sections = $sections.ToArray()
+        Ran      = $ran.ToArray()
+        Skipped  = $skipped.ToArray()
+        Failed   = $failed.ToArray()
+        Status   = $statusArr
+        Errors   = $errorRows
     }
-    catch {
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'EX.CH-01 collector failed' -Data @{ error=$_.Exception.Message }
-    }
+}
 
-    try {
-        $upgFinding = Invoke-ExchCollector_UPG_01_SEReadiness -Run $Run -DomainFinding $domainFinding -OsFinding $osFinding -ExchangeFinding $exchFinding
-        if ($upgFinding) { $findings.Add($upgFinding) | Out-Null }
-    }
-    catch {
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'UPG-01 collector failed' -Data @{ error=$_.Exception.Message }
-    }
+function New-ExchCollectorStatusRow {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Entry,
+        [Parameter(Mandatory)][ValidateSet('Ran', 'Skipped', 'Failed')][string]$Status,
+        [Parameter()][double]$Seconds = 0,
+        [Parameter()][string]$Detail = ''
+    )
 
-    try {
-        $dbFinding = Invoke-ExchCollector_MB_DB_01_DatabaseHealth -Run $Run
-        if ($dbFinding) { $findings.Add($dbFinding) | Out-Null }
+    [pscustomobject]@{
+        ControlId = [string]$Entry.Id
+        Area      = [string]$Entry.Area
+        Status    = $Status
+        Seconds   = $Seconds
+        Detail    = $Detail
     }
-    catch {
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'MB.DB-01 collector failed' -Data @{ error=$_.Exception.Message }
-    }
+}
 
-    try {
-        $dagFinding = Invoke-ExchCollector_DAG_01_DagHealth -Run $Run
-        if ($dagFinding) { $findings.Add($dagFinding) | Out-Null }
-    }
-    catch {
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'DAG-01 collector failed' -Data @{ error=$_.Exception.Message }
-    }
+function Get-ExchRunErrorRow {
+    <#
+    Flattens the run's error list into report rows. Everything needed to diagnose a failure
+    without re-running the assessment is here; the untruncated detail stays in run.jsonl.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateNotNull()]$Run)
 
-    try {
-        $connFinding = Invoke-ExchCollector_TR_CO_01_TransportConnectors -Run $Run
-        if ($connFinding) { $findings.Add($connFinding) | Out-Null }
-    }
-    catch {
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'TR.CO-01 collector failed' -Data @{ error=$_.Exception.Message }
-    }
+    $list = Get-ExchRunErrorList -Run $Run
+    if ($null -eq $list) { return @() }
 
-    try {
-        $certFinding = Invoke-ExchCollector_CERT_01_Certificates -Run $Run
-        if ($certFinding) { $findings.Add($certFinding) | Out-Null }
+    foreach ($record in $list) {
+        $detail = $record.detail
+        [pscustomobject]@{
+            TimestampUtc          = $record.timestampUtc
+            ControlId             = $record.controlId
+            Context               = $record.context
+            Severity              = $record.severity
+            ExceptionType         = $(if ($detail) { $detail.exceptionType } else { '' })
+            Message               = $(if ($detail) { $detail.message } else { '' })
+            ScriptName            = $(if ($detail) { Split-Path -Path ([string]$detail.scriptName) -Leaf } else { '' })
+            LineNumber            = $(if ($detail) { $detail.lineNumber } else { 0 })
+            FullyQualifiedErrorId = $(if ($detail) { $detail.fullyQualifiedErrorId } else { '' })
+            InnerExceptions       = $(if ($detail) { (@($detail.innerExceptions | ForEach-Object { "$($_.type): $($_.message)" }) -join ' | ') } else { '' })
+        }
     }
-    catch {
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'CERT-01 collector failed' -Data @{ error=$_.Exception.Message }
-    }
-
-    try {
-        $avFinding = Invoke-ExchCollector_MB_AV_01_AVExclusions -Run $Run
-        if ($avFinding) { $findings.Add($avFinding) | Out-Null }
-    }
-    catch {
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'MB.AV-01 collector failed' -Data @{ error=$_.Exception.Message }
-    }
-
-    try {
-        $spamFinding = Invoke-ExchCollector_AA_SPAM_01_AntiMalwareSpam -Run $Run
-        if ($spamFinding) { $findings.Add($spamFinding) | Out-Null }
-    }
-    catch {
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'AA.SPAM-01 collector failed' -Data @{ error=$_.Exception.Message }
-    }
-
-    try {
-        $hybFinding = Invoke-ExchCollector_HYB_01_HybridConfig -Run $Run
-        if ($hybFinding) { $findings.Add($hybFinding) | Out-Null }
-    }
-    catch {
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'HYB-01 collector failed' -Data @{ error=$_.Exception.Message }
-    }
-
-    try {
-        $syncFinding = Invoke-ExchCollector_ID_SYNC_01_AADConnectStatus -Run $Run
-        if ($syncFinding) { $findings.Add($syncFinding) | Out-Null }
-    }
-    catch {
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'ID.SYNC-01 collector failed' -Data @{ error=$_.Exception.Message }
-    }
-
-    try {
-        $logFinding = Invoke-ExchCollector_LOG_EX_01_EventLogErrors -Run $Run
-        if ($logFinding) { $findings.Add($logFinding) | Out-Null }
-    }
-    catch {
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'LOG.EX-01 collector failed' -Data @{ error=$_.Exception.Message }
-    }
-
-    try {
-        $admFinding = Invoke-ExchCollector_EX_ADM_01_AcceptedDomains -Run $Run
-        if ($admFinding) { $findings.Add($admFinding) | Out-Null }
-    }
-    catch {
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'EX.ADM-01 collector failed' -Data @{ error=$_.Exception.Message }
-    }
-
-    try {
-        $vdirFinding = Invoke-ExchCollector_EX_VDIR_01_VirtualDirectories -Run $Run
-        if ($vdirFinding) { $findings.Add($vdirFinding) | Out-Null }
-    }
-    catch {
-        Write-ExchEvent -Run $Run -Level ERROR -Message 'EX.VDIR-01 collector failed' -Data @{ error=$_.Exception.Message }
-    }
-
-    return $findings.ToArray()
 }

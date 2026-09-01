@@ -14,13 +14,16 @@ evaluate" from "passed", and the analyzer suspensions below are gone.
 | Phase | Scope | Status | Date |
 | --- | --- | --- | --- |
 | P1 | Extraction onto template-ps-tool: manifest hygiene, smoke tests, CI green | Done | 2026-08-13 |
-| P2 | Retire the four analyzer suspensions (see *Inherited analyzer debt*) | Planned | |
+| P2 | Retire the four analyzer suspensions (see *Inherited analyzer debt*) | Mostly done | 2026-08-31 |
 | P3 | Runtime verification against a live Exchange organisation | Planned | |
-| P4 | Finish the AV exclusion check — compare, do not just report | Planned | |
-| P5 | Operational health checks: service, mail flow, replication, queues, index | Planned | |
+| P4 | Finish the AV exclusion check — compare, do not just report | Done | 2026-08-31 |
+| P5 | Operational health checks: service, mail flow, replication, queues, index | Done | 2026-09-01 |
 | P6 | Ignore list, alerting and scheduled-run modes | Planned | |
-| P7 | Operational documentation output | Planned | |
+| P7 | Operational documentation output | Superseded by P9 | 2026-08-31 |
 | P8 | Packaging and first tagged release | Planned | |
+| P9 | Inventory model, threshold configuration, CSV and JSON reporting | Done | 2026-08-31 |
+| P10 | Full-environment collector coverage (see *P10 scope*) | Done | 2026-09-01 |
+| P11 | Exchange Online collection for the tenant side of a hybrid organisation | Done | 2026-09-01 |
 
 ## The 5.1 constraint
 
@@ -34,12 +37,14 @@ applied — the same call as ADForestAssessment and ExchangeEnvironmentToolkit.
 
 ### P2 — Inherited analyzer debt
 
-| Rule | Hits | What the fix means |
-| --- | --- | --- |
-| `PSAvoidUsingEmptyCatchBlock` | 19 | The big one. Collectors swallow per-control failures, so a control that could not be evaluated is indistinguishable from one that passed. The findings model already has `Unknown` outcomes and `HardFail` sufficiency for exactly this case, and several collectors use them properly on their outer error path — the 19 bare `catch { }` blocks are the ones that do not. In an evidence tool, a silent gap is worse than a failure. |
-| `PSUseSingularNouns` | 7 | e.g. `Get-ExchAcceptedDomains`, `Get-ExchVirtualDirectories`. Internal to the module. |
-| `PSUseShouldProcessForStateChangingFunctions` | 3 | `New-*` / `Save-*` / `Export-*` write to the run folder. The assessment itself never writes to Exchange. |
-| `PSUseApprovedVerbs` | 2 | `Ensure-ExchLocalShell`, `Ensure-ExchADModule`, both private. |
+Two of the four suspensions are gone as of P9 and now fail the build.
+
+| Rule | Hits then | Hits now | State |
+| --- | --- | --- | --- |
+| `PSAvoidUsingEmptyCatchBlock` | 19 | 0 | **Cleared.** Every collector was rewritten to report `Unknown`/`HardFail` with a reason instead of swallowing the failure. The rule is enabled explicitly in the settings file so a silent gap fails CI. |
+| `PSUseApprovedVerbs` | 2 | 0 | **Cleared.** `Ensure-ExchLocalShell` and `Ensure-ExchADModule` are now `Assert-*`. |
+| `PSUseSingularNouns` | 7 | 7 | **Suspended, not outstanding.** Six are collector functions whose names encode the control they implement; the seventh is `Save-ExchFindings`, which saves all of them. Renaming would make the names less accurate. |
+| `PSUseShouldProcessForStateChangingFunctions` | 3 | 8 | **Suspended, not outstanding.** All on `New-*` factories. Three build in-memory objects and change nothing; the rest write only inside the run folder. Read-only against Exchange is enforced by the read-only cmdlet test instead, which is a real check rather than a naming convention. |
 
 ### P3 — Runtime verification
 
@@ -49,13 +54,12 @@ against an Exchange organisation from this repository. Run a full
 hash manifest covers every evidence file, the CAB CSV is populated, and the Word report
 generates.
 
-### P4 — Finish the AV exclusion check
+### P4 — Finish the AV exclusion check — Done 2026-08-31
 
-`MB.AV-01.AVExclusions.ps1` declares the Microsoft-recommended exclusion tokens —
-`Microsoft\Exchange Server`, `TransportRoles`, `ClientAccess` — and then never compares the
-collected exclusions against them. The collector reports what *is* configured; it does not
-report what is *missing*, which is the question the control is actually asking. The variable
-is kept with a documented analyzer suppression precisely so this gap stays visible.
+`MB.AV-01` now compares each server's configured exclusions against the recommended folder and
+process lists in `Config/Thresholds.psd1` and reports the gap per server, with a
+`security.av-exclusion-gaps` section naming every missing entry. A server whose anti-malware
+product is not Microsoft Defender is reported as not assessed rather than as compliant.
 
 ### P5–P7 — Harvested from the Exchange siblings being archived
 
@@ -97,6 +101,76 @@ already leans that way — its Word step is a Python helper), and content config
 section can be dropped from a client deliverable without touching code. Its output is
 *operational documentation* rather than an audit finding set, which is a genuinely different
 deliverable from the same evidence.
+
+### P9 — Inventory, thresholds and reporting — Done 2026-08-31
+
+Collectors return inventory sections plus findings; the report writers are generic over
+sections. Every judgement value moved into `Config/Thresholds.psd1` with `-ConfigPath` for
+per-client overrides. Output is CSV per area plus one `assessment.json`. Word, PDF and
+Markdown output removed. See CHANGELOG for the full list, including the six correctness bugs
+this uncovered.
+
+### P10 scope — full-environment coverage
+
+Closed. The organisation is now covered by 28 controls:
+
+| Added | Control |
+| --- | --- |
+| Server inventory, roles, AD sites, service health, component states | `SRV-01` |
+| Organisation and per-server transport configuration, transport and journal rules | `TR.CFG-01` |
+| `Test-ReplicationHealth` and `Test-MAPIConnectivity` | `REPL-01` |
+| Transport queue depth, age, retry and suspended state | `TR.QUE-01` |
+| Role groups, privileged membership, role assignments and scopes | `RBAC-01` |
+| Mailbox, quota and archive inventory, external forwarding | `MB.INV-01` |
+| Retention policies and tags, holds, administrator and mailbox audit | `RET-01` |
+| Authentication policies, Basic auth, OWA and mobile policies, per-mailbox protocols, devices | `CAS-01` |
+| Address lists, GAL, offline address books, address book policies | `AL-01` |
+| Public folder mailboxes, hierarchy, legacy databases | `PF-01` |
+| SCHANNEL and .NET TLS state, serialised data signing | `TLS-01` |
+| Security update currency, Emergency Mitigation Service, Windows patch cycle | `PTCH-01` |
+| MX, SPF and DMARC per authoritative domain | `DNS-01` |
+
+Deliberately not covered, with reasons:
+
+- **`Test-Mailflow`** sends live probe messages, which is a write. Mail flow is assessed from
+  connector configuration, transport configuration and queue state instead.
+- **`Get-Message`** returns per-message data that would be a privacy exposure in an assessment
+  artifact. `TR.QUE-01` reports queue depth and age, not message contents.
+- **Performance counters** (`Get-Counter`) need a sampling window to mean anything; a
+  point-in-time assessment would report noise.
+
+### P11 — Exchange Online — Done 2026-09-01
+
+`Connect-ExchOnlineSession` behind `-IncludeExchangeOnline`, supporting interactive, app-only
+certificate and managed identity authentication, plus `CLD.ORG-01`, `CLD.CONN-01`, `CLD.SEC-01`
+and `CLD.MIG-01`. Cloud collectors are marked `Cloud = $true` in the registry and are skipped,
+visibly, unless the switch is given.
+
+Two properties are enforced by tests rather than by convention:
+
+- **Prefix isolation.** The tenant session is imported with a command prefix, and cloud
+  collectors read only through `Invoke-ExchCloudQuery`, which resolves the prefixed name and
+  will not fall back to the unprefixed one. Without this, a cloud collector running inside the
+  Exchange Management Shell would silently report on-premises data as tenant data. A test scans
+  the syntax tree of every `CLD.*` collector and fails on any direct Exchange cmdlet call.
+- **No credential in the run folder.** `Start-Transcript` records the launching command line, so
+  `Protect-ExchRunTranscript` redacts the app id, thumbprint, UPN and managed identity account id
+  before the hash manifest is written. The tenant name is deliberately kept.
+
+### P3 note — property availability across versions
+
+Collectors read Exchange object properties directly, and `Set-StrictMode -Version Latest`
+makes a missing property throw. On a version that does not expose one, the dispatcher turns
+that into an `Unknown`/`HardFail` finding naming the error rather than losing the control, so
+the failure is visible — but it costs the whole control. Shaking this out is part of P3: run
+against each Exchange version in scope and replace any property that turns out to vary with a
+guarded read.
+
+### Cosmetic backlog
+
+Rationale text builds count phrases with a bare format placeholder, so a count of one reads
+"1 servers are..." rather than "1 server is...". Cosmetic only; the counts and the named
+objects are correct.
 
 ## Rules
 

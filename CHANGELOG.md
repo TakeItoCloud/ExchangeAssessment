@@ -7,6 +7,220 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-09-01 (phase P11)
+
+Exchange Online collection for the tenant side of a hybrid organisation, off unless
+`-IncludeExchangeOnline` is given. Coverage is now 32 controls.
+
+- **`CLD.ORG-01`** tenant organisation configuration and accepted domains, including modern
+  authentication and tenant-wide mailbox auditing.
+- **`CLD.CONN-01`** inbound and outbound connectors and transport rules. An inbound connector
+  that accepts mail from any address without requiring TLS or a matching certificate is the
+  cloud equivalent of an open relay and is what this control mainly looks for.
+- **`CLD.SEC-01`** anti-spam, anti-malware and anti-phishing policies, Safe Links and Safe
+  Attachments, and DKIM signing. A tenant where every policy is still the built-in default is
+  reported as untailored rather than as configured. Safe Links and Safe Attachments being absent
+  is reported as "not licensed or not configured", because the Exchange Online session cannot
+  tell those two apart.
+- **`CLD.MIG-01`** migration endpoints, batches and move requests, including batches left failed
+  or open past the configured age.
+
+`Connect-ExchOnlineSession` supports interactive, app-only certificate and managed identity
+authentication. A missing module or failed connection makes each cloud control report `Unknown`
+with the reason; it never drops the control silently, and it never stops the on-premises
+assessment.
+
+**Prefix isolation.** Exchange Online and on-premises Exchange share cmdlet names, and this
+module normally runs inside the Exchange Management Shell where those names are already bound to
+the on-premises organisation. The tenant session is therefore always imported with a command
+prefix (`Cloud` by default, configurable), and cloud collectors read tenant data only through
+`Invoke-ExchCloudQuery`, which resolves the prefixed name and deliberately will not fall back to
+the unprefixed one - answering a cloud question with on-premises data would be worse than
+answering it with nothing. A test walks the syntax tree of every `CLD.*` collector and fails the
+build on any direct Exchange cmdlet call.
+
+### Fixed — 2026-09-01
+
+- **The run transcript leaked sign-in identifiers.** `Start-Transcript` records the command line
+  that launched the run, so an operator passing `-CloudAppId` and
+  `-CloudCertificateThumbprint` had them written into `logs/transcript.txt`, which is hashed,
+  zipped and handed to the client. `Protect-ExchRunTranscript` now redacts the app id,
+  certificate thumbprint, user principal name and managed identity account id from the
+  transcript before the hash manifest is written, so the manifest covers the redacted file. The
+  tenant name is kept: the report needs to say which organisation was assessed. If the
+  transcript cannot be rewritten the run warns loudly rather than shipping it quietly.
+
+### Added — 2026-09-01 (phase P10, complete)
+
+Ten collectors, taking coverage to 28 controls across the whole organisation.
+
+- **`TR.QUE-01`** transport queue depth, age, retry and suspended state, with the poison queue
+  called out separately. The finding says it is a single sample, because a queue that is
+  draining and one that is stuck look identical from one reading.
+- **`RBAC-01`** role groups, privileged membership, management role assignments and scopes.
+  Organization Management membership is the headline number: it is administrative control of
+  every mailbox in the estate.
+- **`MB.INV-01`** mailbox, quota and archive inventory, and mailboxes forwarding outside the
+  organisation. Capped by `Mailbox.MaxMailboxes` and skippable with `-SkipMailboxInventory`;
+  when the cap bites the finding says so rather than reporting a sample as the whole estate.
+- **`RET-01`** retention policies and tags, litigation hold, administrator audit configuration
+  and mailbox audit bypass.
+- **`CAS-01`** authentication policies and whether any of them actually blocks Basic
+  authentication on every protocol, OWA and mobile device policies, per-mailbox legacy
+  protocols, and stale device partnerships.
+- **`AL-01`** address lists, global address list and offline address books, including an OAB
+  with no generating mailbox, which leaves Outlook with a stale address book.
+- **`PF-01`** public folder mailboxes, hierarchy and legacy public folder databases.
+- **`TLS-01`** SCHANNEL protocol state per server and role, .NET strong cryptography and system
+  default TLS versions, and Exchange serialised data signing. An absent SCHANNEL key is reported
+  as the operating system default rather than guessed as on or off.
+- **`PTCH-01`** security update currency (taken from `EX.CH-01` rather than re-derived),
+  Emergency Mitigation Service state, and Windows patch cycle.
+- **`DNS-01`** MX, SPF and DMARC for every authoritative accepted domain, including an SPF
+  record ending in a permissive qualifier and a DMARC policy of none.
+
+Two new switches: `-SkipMailboxInventory` and `-SkipDnsQueries`, alongside the existing
+`-SkipDomainQueries`. `Test-Mailflow`, `Get-Message` and performance counters are deliberately
+out of scope; PORT-PLAN records why.
+
+### Changed — 2026-09-01 (failure logging)
+
+A failure is now recorded in enough detail to diagnose without re-running, and it reaches the
+report rather than only the log.
+
+- `Get-ExchErrorDetail` flattens an ErrorRecord into the exception type, message, fully
+  qualified error id, category, target object, script name and line number, the offending
+  source line, the full script stack trace, and the whole inner-exception chain.
+- `Write-ExchError` writes that to `logs/run.jsonl` **and** appends it to the run's error list.
+  Every collector's catch block and every `Invoke-ExchQuery` failure now goes through it.
+- Two new report sections and CSVs: `run.errors` (every failure with its detail) and
+  `run.collectors` (every collector with its status, duration and output). The entry script
+  returns `ErrorsLogged`.
+- A collector that throws produces a finding carrying the error detail and naming the file and
+  line it was thrown from.
+- `Write-ExchLog` retries a locked log file and degrades to a warning rather than failing the
+  run, and falls back to a serialisable form when something in the payload will not convert.
+
+### Fixed — 2026-09-01
+
+- **The run's error list never collected anything.** `Get-ExchRunErrorList` returned the list
+  directly, and PowerShell unrolls a collection on return, so an empty list came back as
+  `$null`. The caller took that to mean there was no list, skipped the `Add`, and left the list
+  empty for the rest of the run - so every failure reached the log and none reached the report.
+  Returning `, $list` prevents the unroll, and a test now guards it.
+- `PF-01` assigned a literal `Compliant` when no public folders were deployed, the same class of
+  hardcoded verdict already removed from `DAG-01`. Whether public folders are expected is now a
+  threshold (`PublicFolder.RequirePublicFolders`), so a client that depends on them gets a
+  failure instead of a pass.
+- `PTCH-01` produced a doubled full stop when embedding the upstream `EX.CH-01` rationale.
+- `TLS-01` passed its protocol list into the remote scriptblock with `-ArgumentList`; it now
+  uses `$using:`, which is idiomatic and satisfies the analyzer's new-runspace scope rule.
+
+### Added — 2026-09-01 (phase P10, partial)
+
+Three collectors, closing the coverage gaps that were named explicitly: transport settings,
+replication, and a real server inventory.
+
+- **`SRV-01` — server inventory and service health.** How many Exchange servers there are,
+  what roles they hold, which Active Directory site each sits in, whether `Test-ServiceHealth`
+  reports every required service running, and whether any server component has been left
+  Inactive. The organisation previously called `Get-ExchangeServer` three times and kept only
+  the name, edition and version.
+- **`TR.CFG-01` — transport configuration.** Organisation-wide limits, shadow redundancy and
+  Safety Net hold time, per-server transport and frontend transport services including message
+  tracking, and the transport and journal rules that redirect or copy mail. Transport settings
+  were previously absent entirely.
+- **`REPL-01` — replication and client connectivity.** `Test-ReplicationHealth` on every DAG
+  member and `Test-MAPIConnectivity` against every mounted database. `Test-Mailflow` is
+  deliberately not used: it sends live messages, and this assessment stays read-only.
+
+The read-only test now walks the PowerShell AST rather than the file text, so a cmdlet named
+in a comment or a message string is no longer mistaken for a call, and a real invocation of a
+state-changing cmdlet is caught wherever it appears.
+
+### Fixed — 2026-09-01
+
+- Two boolean checks compared against the strings `'True'` and `'False'`. PowerShell coerces
+  the right operand of `-eq` to the left operand's type and every non-empty string is a true
+  boolean, so the message-tracking check reported exactly the servers that were fine and
+  ignored the ones that were not.
+
+### Changed — 2026-08-31 (phase P9)
+
+The assessment is reworked around a configuration inventory that is separate from the
+findings, and the reporting layer is replaced with raw CSV and a single consolidated JSON.
+
+**Inventory model.** A collector now returns inventory sections and findings
+(`New-ExchCollectorResult`) instead of one finding plus an ad-hoc JSON blob. A section is a
+table with a stable key, an area, an ordered column list and rows already flattened to
+CSV-safe scalars, so the report writers render whatever sections exist without knowing
+anything about Exchange. This is what removes the pressure on a collector to invent a finding
+when all it had was an inventory to report.
+
+**Nothing is hardcoded.** `Config/Thresholds.psd1` holds every value the tool judges against —
+supported builds and operating systems, certificate expiry windows, queue and backup
+thresholds, the Microsoft-recommended anti-malware exclusions, TLS and DNS expectations.
+`-ConfigPath` merges a client-specific `.psd1` over those defaults, so the same tool assesses
+organisations with different baselines without editing code. `-Outcome` and `-Rationale` are
+now mandatory on `New-ExchFinding`, and a test fails the build if any collector assigns a
+literal `Compliant`.
+
+**Output is CSV and JSON.** `csv/<section>.csv` per configuration area plus `csv/findings.csv`,
+and one `assessment.json` carrying the inventory, the findings with their rationale and
+Microsoft references, and the control catalog. High-cardinality sections are summarised in the
+JSON (`-FullInventory` emits everything) and the file splits into per-area parts above a size
+budget; the CSVs always hold every row. The reports are generated before the run closes, so
+`hash-manifest.json` now covers them.
+
+**Fixed**
+
+- `LOG.EX-01` never produced a finding. The catalog gave it domain `Monitoring`, which was not
+  in `New-ExchFinding`'s `ControlDomain` ValidateSet, so the collector threw on every run and
+  the dispatcher swallowed it. The ValidateSet gains `Monitoring`, `Compliance`, `Client`,
+  `Network` and `Cloud`, and a test now fails if the catalog and the ValidateSet drift apart
+  again.
+- `EX.ADM-01` and `EX.VDIR-01` returned a literal `Compliant`/`Pass` regardless of what they
+  found. Both now evaluate: accepted domains check for wildcard and external relay domains, a
+  missing or duplicated default, and auto-forwarding on the default remote domain; virtual
+  directories check for missing external URLs, plain HTTP, Basic authentication on externally
+  published directories, inconsistent URLs across servers, and a missing Autodiscover SCP.
+- `EX.CH-01` scored an Exchange 2019 organisation as `PartiallyCompliant`. Exchange 2016 and
+  2019 both reached end of support on 2025-10-14, so only Exchange Server SE is supported.
+  `Catalog/BuildTable.ps1` provides real build currency and carries the date it was last
+  refreshed; a build newer than the table is reported as unverifiable, never as current.
+- `ENV.OS-01` used Windows Server 2016 as its floor; Exchange SE requires Windows Server 2019
+  or later.
+- `ENV.VERS-01` checked `Get-ADRootDSE.schemaVersion`, which is the Active Directory schema
+  version rather than the Exchange one. It now reads `rangeUpper` on
+  `ms-Exch-Schema-Version-Pt` and `objectVersion` on both the organisation container and
+  Microsoft Exchange System Objects — the three values Exchange setup actually gates on.
+- The open-relay test in `TR.CO-01` matched the literal string `0.0.0.0-255.255.255.255` and
+  missed `0.0.0.0/0` and the IPv6 equivalents.
+- `MB.AV-01` declared the Microsoft-recommended exclusions and never compared against them
+  (PORT-PLAN P4). It now reports what is missing per server.
+- `MB.DB-01` collected copy queue lengths and content index state and never evaluated them,
+  and did not look at backups at all.
+- `Export-ExchEvidenceBundle` ran after `Close-ExchRun`, so nothing it produced was covered by
+  the hash manifest.
+- `README.md` credited Python 3 and `python-docx` for a Word report that was never generated
+  that way, and showed the entry script with no arguments although `-TenantHint` is mandatory.
+
+**Removed**
+
+- The Word, PDF and Markdown output paths, including `New-ExchWordReport`, the pandoc calls,
+  and `Scripts/Generate-WordReport.py`, which was a seven-line stub nothing ever called. The
+  230-line `Write-ExchMarkdown` inside the bundle exporter is gone with them: it hardcoded a
+  renderer per evidence-file shape and would not have survived the collector expansion.
+- Two of the four PSScriptAnalyzer suspensions (PORT-PLAN P2). `PSAvoidUsingEmptyCatchBlock`
+  went from 19 hits to zero and `PSUseApprovedVerbs` from 2 to zero, so both now fail the
+  build. The remaining two are documented in `PSScriptAnalyzerSettings.psd1` as cosmetic
+  rather than outstanding.
+
+**Collector dispatch** is driven by `Catalog/CollectorRegistry.ps1`, an ordered registry with
+declared dependencies, replacing 148 lines of hand-written try/catch. A collector that throws
+now becomes an `Unknown`/`HardFail` finding naming the error, so a gap in the assessment is
+visible in the output rather than only in the log.
+
 ### Changed — 2026-08-14 (phase P5.3)
 
 The three workflow files backfilled in P4.4 are refreshed from

@@ -5,7 +5,7 @@
     Author            = 'Carlos Annes'
     CompanyName       = 'Caannes IT Consulting'
     Copyright         = '(c) 2026 Carlos Annes. All rights reserved.'
-    Description       = 'Exchange On-Prem/Hybrid Assessment - evidence collection, findings, and bundle export (read-only).'
+    Description       = 'Exchange On-Prem/Hybrid Assessment - configuration inventory, health findings and CSV/JSON reporting (read-only).'
     PowerShellVersion = '5.1'
     CompatiblePSEditions = @('Desktop', 'Core')
 
@@ -15,8 +15,10 @@
         'New-ExchFinding',
         'Write-ExchEvent',
         'Invoke-ExchCollection',
+        'Export-ExchCsvReport',
+        'New-ExchAssessmentJson',
+        'Export-ExchControlSnapshot',
         'Export-ExchEvidenceBundle',
-        'New-ExchWordReport',
         'Save-ExchFindings',
         'Write-ExchEvidenceFile',
         'Get-ExchPreflightReport'
