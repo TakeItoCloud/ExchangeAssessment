@@ -13,6 +13,9 @@ function New-ExchRun {
         # A .psd1 whose keys are merged over Config/Thresholds.psd1, so a client baseline can
         # differ from the default without editing the module.
         [Parameter()][string]$ConfigPath,
+        # A .psd1 replacing Config/BuildTable.psd1 for this run, so a newer copy of Microsoft's
+        # build list can be used without editing the module.
+        [Parameter()][string]$BuildTablePath,
         # Emit every inventory row into assessment.json instead of summarising the sections
         # whose size scales with the organisation.
         [Parameter()][switch]$FullInventory,
@@ -41,6 +44,10 @@ function New-ExchRun {
 
     $config = Import-ExchConfiguration -ConfigPath $ConfigPath
 
+    if ($BuildTablePath -and -not (Test-Path -LiteralPath $BuildTablePath)) {
+        throw "BuildTablePath not found: $BuildTablePath"
+    }
+
     Start-Transcript -Path $transcriptPath -Force | Out-Null
 
     Write-ExchLog -Level 'INFO' -Message 'Run created' -Data @{
@@ -48,6 +55,7 @@ function New-ExchRun {
         tenantHint = $TenantHint
         runFolder  = $runFolder
         configPath = if ($ConfigPath) { $ConfigPath } else { 'default' }
+        buildTablePath = if ($BuildTablePath) { $BuildTablePath } else { 'default' }
     } -LogPath $logPath
 
     [pscustomobject]@{
@@ -60,6 +68,7 @@ function New-ExchRun {
         StartedUtc     = (Get-Date).ToUniversalTime()
         Config         = $config
         ConfigPath     = $ConfigPath
+        BuildTablePath = $BuildTablePath
         # Every failure recorded by Write-ExchError lands here as well as in the log, so the
         # report can say what could not be read rather than quietly omitting it.
         Errors         = (New-Object System.Collections.Generic.List[object])

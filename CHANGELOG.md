@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — 2026-09-01 (phase P12)
+
+Six correctness fixes, each checked against Microsoft Learn before it was written. Every one of
+them changed an answer the tool was giving, and two of them were giving that answer on every
+organisation it would ever be pointed at.
+
+- **`TR.CO-01` reported an open relay on every Exchange organisation.** The test was
+  `AnonymousUsers -and an unrestricted remote IP range`, which is the exact shape of
+  `Default Frontend <ServerName>` - the receive connector Exchange setup creates on every
+  Mailbox server. So the control returned NonCompliant/High on 100% of correctly built
+  organisations, which is worse than not having the control at all. The Anonymous users
+  permission group maps to `NT AUTHORITY\ANONYMOUS LOGON` and grants accept-any-sender and
+  submit; it does **not** grant `ms-Exch-SMTP-Accept-Any-Recipient`, the right that actually
+  permits relay. Each receive connector's permissions are now read with `Get-ADPermission`
+  (non-denied, non-inherited entries only) and the answer is three-state: `Granted`,
+  `NotGranted` or `Unknown`. A connector is an open relay only when it is enabled, listens on an
+  unrestricted range, and either grants that right to an anonymous principal or combines the
+  `ExchangeServers` permission group with `ExternalAuthoritative` authentication. A connector
+  whose permissions could not be read is reported as not assessable - an `Unknown` outcome and a
+  SoftFail naming it - because a failed read cannot rule relay out. `AllowsAnonymous` and
+  `UnrestrictedRange` remain as inventory columns; they are facts, just not verdicts.
+- **The build table was twelve months stale and is now a data file.** `TableAsOf` said
+  2026-08-31 while the newest Exchange Server SE row was 15.2.2562.20 from 2025-08-12 - and SE
+  is the only supported Exchange version, so `EX.CH-01` returned `Unknown` for every correctly
+  patched server. The table moved to `Config/BuildTable.psd1` (81 builds, verified 2026-09-02),
+  `-BuildTablePath` points a run at a newer copy without editing the module, and a missing or
+  unparseable table now throws instead of degrading to an empty one that would report every
+  server as unverifiable. A new `Exchange.MaxBuildTableAgeDays` threshold makes the table's own
+  age a finding: past 60 days the rationale says build currency is being judged against a stale
+  reference and the outcome drops to PartiallyCompliant. A build absent from the table is still
+  `Unknown`, never Compliant.
+- **Active Directory preparation levels covered only Exchange 2019 and SE.** A 2016
+  organisation - the main population an SE readiness assessment meets - reported
+  "Unrecognised preparation level". Twenty-eight rows were added covering Exchange 2016 RTM to
+  CU23, Exchange 2013 RTM to CU23, and Exchange 2019 CU2-CU6. Each `rangeUpper`/`objectVersion`
+  pair appears exactly once, so no lower cumulative update can shadow a higher one, and a test
+  enforces that.
+- **`Windows2025Forest` and `Windows2025Domain` were removed as unverified.** Windows Server
+  2025 introduced functional level 10, and Microsoft has not added it to the Exchange
+  supportability matrix - which lists Windows Server 2016 and 2012 R2 only. Claiming support
+  Microsoft has not stated is a worse failure than reporting the level as unlisted. `ENV.VERS-01`
+  now words that outcome as "not listed by Microsoft as supported", naming the levels that are,
+  rather than asserting the level is broken.
+- **Operating system supportability is per Exchange version, not global.** `Resolve-ExchOsSupport`
+  applied one floor of Windows Server 2019 to every server, so a correctly built Exchange 2016
+  server on Windows Server 2016 was reported as running an unsupported operating system.
+  `OperatingSystem.SupportMatrix` now holds a row per Exchange version with an explicit
+  `SupportedBuilds` list - Exchange 2016's set has an upper bound as well as a floor, which a
+  `>=` comparison cannot express - and `ENV.OS-01` resolves each server's Exchange family before
+  judging its operating system, naming both sides in the rationale. An Exchange version with no
+  row reports `Unknown` with the reason rather than a verdict. `ENV.VERS-01` also gained a
+  Schema Master check: on Windows Server 2025 it must be on build 10.0.26100.7171 or later
+  (KB5068861) before any `/PrepareSchema` or `/PrepareAD`, and a Schema Master whose operating
+  system cannot be read makes that one item Unknown instead of losing the control.
+- **`TR.QUE-01` reported one server's queues as though they were the organisation's.**
+  `Get-Queue` with no `-Server` qualifier implies the local server. The collector now enumerates
+  transport servers and queries each by name, adds a `Server` column, and states in the
+  rationale how many servers were queried and how many answered. A server that did not answer is
+  named, contributes an `Unknown` outcome and makes the control SoftFail. `Get-QueueDigest` was
+  considered and rejected: it returns only queues holding ten or more messages, its data is one
+  to two minutes old, it excludes subscribed Edge Transport servers, and it does not carry the
+  retry age or `LastError` this control reports.
+
+**Added** — `-BuildTablePath` on `Invoke-ExchAssess.ps1` and `New-ExchRun`; four thresholds
+(`Transport.AnonymousSecurityPrincipals`, `Transport.RelayPermission`,
+`Transport.ExternallySecuredAuthMechanism`, `Transport.ExternallySecuredPermissionGroup`),
+`Exchange.MaxBuildTableAgeDays`, `ActiveDirectory.MinimumSchemaMaster2025Build` and
+`OperatingSystem.SupportMatrix`; and a new `environment.schema-master` inventory section.
+
+**Removed** — `Private/HealthChecks.ps1`. Twelve lines describing themselves as a placeholder
+for a later phase, holding one function nothing called, whose only behaviour was to swallow the
+error and return an empty list. That is the pattern P2 spent a phase removing everywhere else.
+
+**Tests** — sixteen added. Fixture-driven open-relay cases covering Microsoft's default frontend
+connector (must not be a finding), an explicitly granted relay permission, an externally secured
+`ExchangeServers` connector, and an unreadable permission; that `ExchangeLegacyServers` is not
+mistaken for `ExchangeServers`; anonymous principal matching by full name and by leaf; every
+form of unrestricted range, and two forms that are not; build table integrity, no duplicate
+builds, and that a missing table throws; preparation levels unique and named, with the
+configured SE target present as a row; a regression guard that no functional-level list mentions
+Windows Server 2025; that the operating system matrix keys on real product families and parses;
+that Exchange 2016 on Windows Server 2016 is supported while the same operating system under SE
+is not; and an AST check that every `Get-Queue` call names a `-Server`.
+
 ### Added — 2026-09-01 (phase P11)
 
 Exchange Online collection for the tenant side of a hybrid organisation, off unless

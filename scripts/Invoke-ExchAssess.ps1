@@ -19,6 +19,9 @@ param(
     [Parameter()][switch]$SkipDnsQueries,
     # A .psd1 whose keys override Config/Thresholds.psd1 for this client.
     [Parameter()][string]$ConfigPath,
+    # A .psd1 replacing Config/BuildTable.psd1, for a run against a newer copy of Microsoft's
+    # Exchange build list than the one shipped with the module.
+    [Parameter()][string]$BuildTablePath,
     # Put every inventory row in assessment.json instead of summarising the large sections.
     [Parameter()][switch]$FullInventory,
     [Parameter()][switch]$IncludeExchangeOnline,
@@ -43,6 +46,7 @@ try {
     Import-Module $modulePath -Force -ErrorAction Stop
 
     $run = New-ExchRun -OutputRoot $OutputRoot -TenantHint $TenantHint -ConfigPath $ConfigPath `
+        -BuildTablePath $BuildTablePath `
         -FullInventory:$FullInventory -IncludeExchangeOnline:$IncludeExchangeOnline `
         -CloudUserPrincipalName $CloudUserPrincipalName -CloudAppId $CloudAppId `
         -CloudCertificateThumbprint $CloudCertificateThumbprint -CloudOrganization $CloudOrganization `

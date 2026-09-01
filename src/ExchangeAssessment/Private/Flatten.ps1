@@ -97,3 +97,38 @@ function ConvertTo-ExchFlatRow {
 
     return [pscustomobject]$row
 }
+
+function Get-ExchObjectValue {
+    <#
+    Reads one property off an object that may not carry it.
+
+    Set-StrictMode -Version Latest turns a missing property into a terminating error, and
+    Exchange object shapes vary by version and by role - a guarded read is the difference
+    between a control reporting a value it did not find and a control taking the whole
+    collector down.
+
+    Intended for scalar properties. A collection-valued property unrolls on return, so read
+    those through PSObject.Properties directly.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()]$InputObject,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Name,
+        [Parameter()]$Default = $null
+    )
+
+    if ($null -eq $InputObject) { return $Default }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        if (-not $InputObject.Contains($Name)) { return $Default }
+        $value = $InputObject[$Name]
+    }
+    else {
+        $property = $InputObject.PSObject.Properties.Match($Name) | Select-Object -First 1
+        if (-not $property) { return $Default }
+        $value = $property.Value
+    }
+
+    if ($null -eq $value) { return $Default }
+    return $value
+}

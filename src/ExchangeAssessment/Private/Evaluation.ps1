@@ -46,19 +46,34 @@ function Resolve-ExchProductFamily {
 
 function Resolve-ExchOsSupport {
     <#
-    Decides whether a Windows Server build is supported for Exchange, and names it.
+    Decides whether a Windows Server build is supported for the Exchange version installed on
+    that server, and names both sides.
+
+    The supported operating system list is per Exchange version, not global: Exchange Server SE
+    and 2019 want Windows Server 2019 or later, while Exchange Server 2016 wants Windows Server
+    2016 or earlier. A single ">= this build" floor gets the second case exactly backwards, so
+    the decision is made against the product's explicit SupportedBuilds list.
+
+    Matched is $false when the product has no row in the matrix. That is "cannot judge", and the
+    caller must report it as Unknown rather than as a verdict either way.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateNotNull()]$Run,
-        [Parameter()][string]$Version
+        [Parameter()][string]$Version,
+        [Parameter()][string]$Product = ''
     )
 
     $result = [pscustomobject]@{
-        Name        = 'Unknown'
-        Supported   = $false
-        Recommended = $false
-        Parsed      = $false
+        Name             = 'Unknown'
+        Product          = $Product
+        Supported        = $false
+        Recommended      = $false
+        Parsed           = $false
+        Matched          = $false
+        MinimumBuild     = ''
+        RecommendedBuild = ''
+        SupportedNames   = ''
     }
 
     if (-not $Version) { return $result }
@@ -67,25 +82,60 @@ function Resolve-ExchOsSupport {
     try { $parsed = [version]$Version } catch { return $result }
     $result.Parsed = $true
 
-    $minimum = $null
-    $recommended = $null
-    try { $minimum = [version](Get-ExchThreshold -Run $Run -Name 'OperatingSystem.MinimumBuild' -Default '10.0.17763') } catch { $minimum = $null }
-    try { $recommended = [version](Get-ExchThreshold -Run $Run -Name 'OperatingSystem.RecommendedBuild' -Default '10.0.20348') } catch { $recommended = $null }
-
     # Match on major.minor.build; the revision differs with every update.
     $trimmed = [version]::new($parsed.Major, $parsed.Minor, [Math]::Max($parsed.Build, 0))
 
-    foreach ($known in @(Get-ExchThreshold -Run $Run -Name 'OperatingSystem.KnownBuilds' -Default @())) {
-        $knownVersion = $null
-        try { $knownVersion = [version]$known.Build } catch { continue }
-        if ($trimmed -eq $knownVersion) { $result.Name = [string]$known.Name; break }
-    }
-    if ($result.Name -eq 'Unknown') { $result.Name = $Version }
+    $known = @(Get-ExchThreshold -Run $Run -Name 'OperatingSystem.KnownBuilds' -Default @())
+    $result.Name = Resolve-ExchOsBuildName -Build $trimmed -KnownBuilds $known -Fallback $Version
 
-    if ($minimum)     { $result.Supported   = ($trimmed -ge $minimum) }
-    if ($recommended) { $result.Recommended = ($trimmed -ge $recommended) }
+    $row = $null
+    foreach ($candidate in @(Get-ExchThreshold -Run $Run -Name 'OperatingSystem.SupportMatrix' -Default @())) {
+        if ([string]$candidate.Product -eq $Product) { $row = $candidate; break }
+    }
+    if ($null -eq $row) { return $result }
+
+    $result.Matched          = $true
+    $result.MinimumBuild     = [string]$row.MinimumBuild
+    $result.RecommendedBuild = [string]$row.RecommendedBuild
+
+    $supportedNames = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in @($row.SupportedBuilds)) {
+        $supportedVersion = $null
+        try { $supportedVersion = [version]$entry } catch { continue }
+        $supportedNames.Add((Resolve-ExchOsBuildName -Build $supportedVersion -KnownBuilds $known -Fallback ([string]$entry))) | Out-Null
+        if ($trimmed -eq $supportedVersion) { $result.Supported = $true }
+    }
+    $result.SupportedNames = ($supportedNames.ToArray() -join ', ')
+
+    if ($result.Supported -and $row.RecommendedBuild) {
+        $recommended = $null
+        try { $recommended = [version]$row.RecommendedBuild } catch { $recommended = $null }
+        if ($recommended) { $result.Recommended = ($trimmed -ge $recommended) }
+    }
 
     return $result
+}
+
+function Resolve-ExchOsBuildName {
+    <#
+    Names a Windows Server build from the configured build-to-name list, falling back to the
+    build string when the list does not know it.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][version]$Build,
+        [Parameter()][object[]]$KnownBuilds = @(),
+        [Parameter()][string]$Fallback = ''
+    )
+
+    foreach ($known in @($KnownBuilds)) {
+        $knownVersion = $null
+        try { $knownVersion = [version]$known.Build } catch { continue }
+        if ($Build -eq $knownVersion) { return [string]$known.Name }
+    }
+
+    if ($Fallback) { return $Fallback }
+    return $Build.ToString()
 }
 
 function Resolve-ExchFunctionalLevel {

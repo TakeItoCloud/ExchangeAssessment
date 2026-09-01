@@ -1,43 +1,67 @@
 <#
-Known Exchange Server builds.
+Access to the Exchange build table.
 
-Source: https://learn.microsoft.com/exchange/new-features/build-numbers-and-release-dates
+The data itself lives in Config/BuildTable.psd1 so it can be refreshed - or replaced for one run
+with -BuildTablePath - without touching code. This file only loads it and answers questions
+about it.
 
-This table is a point-in-time copy and it will go stale. It therefore carries the date it was
-last refreshed, and the collector that uses it treats "your build is newer than anything I know
-about" as "cannot verify", never as "current". A tool that reports a pass from a stale table is
-worse than one that says it does not know.
-
-Refresh: add the new rows, move TableAsOf, note it in CHANGELOG.md.
+A missing or unparseable table is an error, not an empty table: judging build currency against
+nothing would report every server as unverifiable and look like a clean run.
 #>
 
 Set-StrictMode -Version Latest
 
-function Get-ExchBuildTable {
+function Get-ExchBuildTablePath {
+    <#
+    The table this run should use: the caller's copy when one was supplied, otherwise the one
+    that ships with the module.
+    #>
     [CmdletBinding()]
-    param()
+    param([Parameter()]$Run)
+
+    if ($Run) {
+        $prop = $Run.PSObject.Properties.Match('BuildTablePath') | Select-Object -First 1
+        if ($prop -and $prop.Value) { return [string]$prop.Value }
+    }
+
+    return (Join-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -ChildPath 'Config/BuildTable.psd1')
+}
+
+function Get-ExchBuildTable {
+    <#
+    Loads the build table. TableAsOf comes back as a [datetime] so callers can do date
+    arithmetic on it without re-parsing.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()][string]$Path,
+        [Parameter()]$Run
+    )
+
+    $resolved = if ($Path) { $Path } else { Get-ExchBuildTablePath -Run $Run }
+
+    if (-not (Test-Path -LiteralPath $resolved)) {
+        throw "Exchange build table not found at $resolved. Supply a valid -BuildTablePath, or restore Config/BuildTable.psd1."
+    }
+
+    $data = $null
+    try { $data = Import-PowerShellDataFile -Path $resolved }
+    catch { throw "Exchange build table at $resolved could not be parsed: $($_.Exception.Message)" }
+
+    if ($null -eq $data) { throw "Exchange build table at $resolved is empty." }
+    foreach ($key in @('TableAsOf', 'Source', 'Builds')) {
+        if (-not $data.Contains($key)) { throw "Exchange build table at $resolved is missing the '$key' key." }
+    }
+
+    $asOf = $null
+    try { $asOf = [datetime]::ParseExact([string]$data.TableAsOf, 'yyyy-MM-dd', [cultureinfo]::InvariantCulture) }
+    catch { throw "Exchange build table at $resolved has a TableAsOf of '$($data.TableAsOf)', which is not a yyyy-MM-dd date." }
 
     return [pscustomobject]@{
-        TableAsOf = [datetime]'2026-08-31'
-        Source    = 'https://learn.microsoft.com/exchange/new-features/build-numbers-and-release-dates'
-        Builds    = @(
-            # Exchange Server SE
-            @{ Build='15.2.2562.20'; Product='Exchange Server SE'; Release='Exchange Server SE RTM Aug25SU'; Released='2025-08-12' }
-            @{ Build='15.2.2562.17'; Product='Exchange Server SE'; Release='Exchange Server SE RTM';         Released='2025-07-01' }
-
-            # Exchange Server 2019 - out of support since 2025-10-14
-            @{ Build='15.2.1748.49'; Product='Exchange Server 2019'; Release='Exchange Server 2019 CU15 Aug26SU'; Released='2026-08-11' }
-            @{ Build='15.2.1748.48'; Product='Exchange Server 2019'; Release='Exchange Server 2019 CU15 Jul26SU'; Released='2026-07-14' }
-            @{ Build='15.2.1748.46'; Product='Exchange Server 2019'; Release='Exchange Server 2019 CU15 Jun26SU'; Released='2026-06-09' }
-            @{ Build='15.2.1748.43'; Product='Exchange Server 2019'; Release='Exchange Server 2019 CU15 Feb26SU'; Released='2026-02-10' }
-            @{ Build='15.2.1748.42'; Product='Exchange Server 2019'; Release='Exchange Server 2019 CU15 Dec25SU'; Released='2025-12-09' }
-            @{ Build='15.2.1544.4';  Product='Exchange Server 2019'; Release='Exchange Server 2019 CU14 (2024H1)'; Released='2024-02-13' }
-            @{ Build='15.2.1258.12'; Product='Exchange Server 2019'; Release='Exchange Server 2019 CU13 (2023H1)'; Released='2023-05-03' }
-            @{ Build='15.2.1118.7';  Product='Exchange Server 2019'; Release='Exchange Server 2019 CU12 (2022H1)'; Released='2022-04-20' }
-
-            # Exchange Server 2016 - out of support since 2025-10-14
-            @{ Build='15.1.2507.6';  Product='Exchange Server 2016'; Release='Exchange Server 2016 CU23 (2022H1)'; Released='2022-04-20' }
-        )
+        TableAsOf = $asOf
+        Source    = [string]$data.Source
+        Path      = $resolved
+        Builds    = @($data.Builds)
     }
 }
 
@@ -48,32 +72,37 @@ function Resolve-ExchBuild {
     Returns the matched row when the exact build is known. When it is not, says whether the
     build is ahead of everything the table knows for that product - which means the table is
     behind, not that the server is wrong.
+
+    Pass -Table to reuse an already loaded table rather than reading the file once per server.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Build,
-        [Parameter()][string]$Product = ''
+        [Parameter()][string]$Product = '',
+        [Parameter()]$Table,
+        [Parameter()]$Run
     )
 
-    $table = Get-ExchBuildTable
+    if (-not $Table) { $Table = Get-ExchBuildTable -Run $Run }
+
     $parsed = $null
     try { $parsed = [version]$Build } catch { $parsed = $null }
 
-    $exact = @($table.Builds | Where-Object { $_.Build -eq $Build }) | Select-Object -First 1
+    $exact = @($Table.Builds | Where-Object { $_.Build -eq $Build }) | Select-Object -First 1
     if ($exact) {
         return [pscustomobject]@{
-            Known        = $true
+            Known          = $true
             NewerThanTable = $false
-            Release      = $exact.Release
-            Product      = $exact.Product
-            Released     = [datetime]$exact.Released
-            TableAsOf    = $table.TableAsOf
+            Release        = [string]$exact.Release
+            Product        = [string]$exact.Product
+            Released       = [datetime]$exact.Released
+            TableAsOf      = $Table.TableAsOf
         }
     }
 
     $newest = $null
     if ($parsed) {
-        $family = @($table.Builds | Where-Object { -not $Product -or $_.Product -eq $Product })
+        $family = @($Table.Builds | Where-Object { -not $Product -or $_.Product -eq $Product })
         foreach ($row in $family) {
             $rowVersion = $null
             try { $rowVersion = [version]$row.Build } catch { continue }
@@ -87,6 +116,6 @@ function Resolve-ExchBuild {
         Release        = ''
         Product        = $Product
         Released       = $null
-        TableAsOf      = $table.TableAsOf
+        TableAsOf      = $Table.TableAsOf
     }
 }

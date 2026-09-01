@@ -459,6 +459,269 @@ Describe 'ExchangeAssessment' {
         }
     }
 
+    Context 'Open relay is a permission, not a shape' {
+
+        BeforeAll {
+            Import-Module -Name $script:ManifestPath -Force -ErrorAction Stop
+
+            # Microsoft's `Default Frontend <ServerName>` connector, as setup creates it on every
+            # Mailbox server. Nothing here came from a real organisation - it is the documented
+            # default, reproduced so the control can be tested against it.
+            function New-TestConnector {
+                param(
+                    [string]$Name = 'Default Frontend EX01',
+                    [string]$Server = 'EX01',
+                    [bool]$Enabled = $true,
+                    [string]$PermissionGroups = 'AnonymousUsers, ExchangeServers, ExchangeLegacyServers',
+                    [string]$AuthMechanism = 'Tls, Integrated, BasicAuth, BasicAuthRequireTLS',
+                    [string[]]$RemoteIPRanges = @('::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', '0.0.0.0-255.255.255.255')
+                )
+                [pscustomobject]@{
+                    Identity          = "$Server\$Name"
+                    Name              = $Name
+                    Server            = $Server
+                    Enabled           = $Enabled
+                    Bindings          = @('0.0.0.0:25')
+                    RemoteIPRanges    = $RemoteIPRanges
+                    PermissionGroups  = $PermissionGroups
+                    AuthMechanism     = $AuthMechanism
+                    Fqdn              = 'mail.contoso.com'
+                    RequireTLS        = $false
+                    MaxMessageSize    = '36 MB'
+                    RequireEHLODomain = $false
+                }
+            }
+
+            function Get-TestRelayRow {
+                param($Connector, [string]$Right)
+                & (Get-Module $script:ModuleName) {
+                    param($c, $r)
+                    New-ExchReceiveConnectorRow -Connector $c -AnonymousGroups @('AnonymousUsers') `
+                        -KnownUnrestricted @('0.0.0.0-255.255.255.255', '::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff') `
+                        -AnonymousRelayRight $r
+                } $Connector $Right
+            }
+
+            function Get-TestRelayAssessment {
+                param($Row)
+                & (Get-Module $script:ModuleName) { param($r) Get-ExchRelayAssessment -Rows @($r) } $Row
+            }
+
+            function Test-TestUnrestricted {
+                param([string]$Range)
+                & (Get-Module $script:ModuleName) { param($r) Test-ExchUnrestrictedRange -Ranges @($r) } $Range
+            }
+        }
+
+        It 'does not call the default frontend connector an open relay' {
+            # AnonymousUsers plus the whole address space is the shipped default. The old logic
+            # returned NonCompliant/High here, on every Exchange organisation there is.
+            $row = Get-TestRelayRow -Connector (New-TestConnector) -Right 'NotGranted'
+
+            $row.AllowsAnonymous | Should -BeTrue
+            $row.UnrestrictedRange | Should -BeTrue
+            $row.AnonymousRelayRight | Should -Be 'NotGranted'
+            $row.OpenRelay | Should -BeFalse
+
+            $assessment = Get-TestRelayAssessment -Row $row
+            @($assessment.OpenRelays).Count | Should -Be 0
+            @($assessment.Problems).Count | Should -Be 0
+            $assessment.Sufficiency | Should -Be 'Pass'
+        }
+
+        It 'calls it an open relay when the relay permission is actually granted' {
+            $row = Get-TestRelayRow -Connector (New-TestConnector) -Right 'Granted'
+            $row.OpenRelay | Should -BeTrue
+
+            $assessment = Get-TestRelayAssessment -Row $row
+            @($assessment.OpenRelays).Count | Should -Be 1
+            $assessment.Outcomes | Should -Contain 'NonCompliant'
+            ($assessment.Problems -join ' ') | Should -Match 'anonymous principal'
+        }
+
+        It 'calls an externally secured ExchangeServers connector an open relay' {
+            $connector = New-TestConnector -Name 'Relay' -PermissionGroups 'ExchangeServers' -AuthMechanism 'ExternalAuthoritative'
+            $row = Get-TestRelayRow -Connector $connector -Right 'NotGranted'
+
+            $row.AllowsAnonymous | Should -BeFalse
+            $row.ExternallySecured | Should -BeTrue
+            $row.OpenRelay | Should -BeTrue
+
+            $assessment = Get-TestRelayAssessment -Row $row
+            ($assessment.Problems -join ' ') | Should -Match 'externally secured'
+        }
+
+        It 'reports a connector whose permissions could not be read as not assessable' {
+            $row = Get-TestRelayRow -Connector (New-TestConnector) -Right 'Unknown'
+            $row.RelayAssessable | Should -BeFalse
+
+            $assessment = Get-TestRelayAssessment -Row $row
+            $assessment.Outcomes | Should -Contain 'Unknown'
+            $assessment.Sufficiency | Should -Be 'SoftFail'
+            ($assessment.Problems -join ' ') | Should -Match 'could not be ruled out'
+        }
+
+        It 'does not mistake ExchangeLegacyServers for ExchangeServers' {
+            $connector = New-TestConnector -PermissionGroups 'ExchangeLegacyServers' -AuthMechanism 'ExternalAuthoritative'
+            $row = Get-TestRelayRow -Connector $connector -Right 'NotGranted'
+            $row.ExternallySecured | Should -BeFalse
+        }
+
+        It 'matches an anonymous principal by full name and by leaf' {
+            $principals = @('NT AUTHORITY\ANONYMOUS LOGON', 'ANONYMOUS LOGON')
+            $match = & (Get-Module $script:ModuleName) {
+                param($u, $p) Test-ExchPrincipalMatch -User $u -Principals $p
+            } 'NT AUTHORITY\ANONYMOUS LOGON' $principals
+            $match | Should -BeTrue
+
+            $other = & (Get-Module $script:ModuleName) {
+                param($u, $p) Test-ExchPrincipalMatch -User $u -Principals $p
+            } 'CONTOSO\svc-relay' $principals
+            $other | Should -BeFalse
+        }
+
+        It 'still recognises every form of an unrestricted remote range' {
+            (Test-TestUnrestricted -Range '0.0.0.0-255.255.255.255') | Should -BeTrue
+            (Test-TestUnrestricted -Range '0.0.0.0/0') | Should -BeTrue
+            (Test-TestUnrestricted -Range '::/0') | Should -BeTrue
+            (Test-TestUnrestricted -Range '::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff') | Should -BeTrue
+            (Test-TestUnrestricted -Range '192.168.1.0-192.168.1.255') | Should -BeFalse
+            (Test-TestUnrestricted -Range '10.0.0.7') | Should -BeFalse
+        }
+    }
+
+    Context 'Reference data integrity' {
+
+        BeforeAll {
+            Import-Module -Name $script:ManifestPath -Force -ErrorAction Stop
+            $script:BuildTable = & (Get-Module $script:ModuleName) { Get-ExchBuildTable }
+            $script:Thresholds = & (Get-Module $script:ModuleName) { Import-ExchConfiguration }
+        }
+
+        It 'loads a build table whose every row parses' {
+            @($script:BuildTable.Builds).Count | Should -BeGreaterThan 0
+            $script:BuildTable.TableAsOf | Should -BeOfType [datetime]
+
+            $bad = foreach ($row in $script:BuildTable.Builds) {
+                if (-not ($row.Build -as [version]))      { "unparseable build: $($row.Build)" }
+                if (-not $row.Product)                    { "row with no product: $($row.Build)" }
+                if (-not $row.Release)                    { "row with no release: $($row.Build)" }
+                if (-not ($row.Released -as [datetime]))  { "unparseable release date: $($row.Build)" }
+            }
+            $bad | Should -BeNullOrEmpty -Because "the build table is malformed: $($bad -join '; ')"
+        }
+
+        It 'lists no build twice' {
+            $duplicates = $script:BuildTable.Builds | Group-Object -Property Build | Where-Object Count -gt 1 | ForEach-Object Name
+            $duplicates | Should -BeNullOrEmpty -Because "duplicated builds: $($duplicates -join ', ')"
+        }
+
+        It 'refuses a missing build table rather than falling back to an empty one' {
+            $missing = Join-Path ([System.IO.Path]::GetTempPath()) ("no-such-build-table-" + [guid]::NewGuid() + '.psd1')
+            { & (Get-Module $script:ModuleName) { param($p) Get-ExchBuildTable -Path $p } $missing } |
+                Should -Throw -Because 'an empty table would report every server as unverifiable and look like a clean run'
+        }
+
+        It 'names each Active Directory preparation level exactly once' {
+            $levels = @($script:Thresholds.ActiveDirectory.KnownPreparationLevels)
+            $levels.Count | Should -BeGreaterThan 0
+
+            $unnamed = @($levels | Where-Object { -not $_.Name })
+            $unnamed | Should -BeNullOrEmpty -Because 'a preparation level with no name cannot be reported'
+
+            $duplicates = $levels | Group-Object -Property { "$($_.RangeUpper)/$($_.ConfigVersion)" } |
+                Where-Object Count -gt 1 | ForEach-Object Name
+            $duplicates | Should -BeNullOrEmpty -Because "a lower cumulative update would shadow a higher one for: $($duplicates -join ', ')"
+        }
+
+        It 'carries a preparation level matching the configured Exchange SE target' {
+            $ad = $script:Thresholds.ActiveDirectory
+            $match = @($ad.KnownPreparationLevels | Where-Object {
+                [int]$_.RangeUpper -eq [int]$ad.TargetSchemaRangeUpper -and
+                [int]$_.ConfigVersion -eq [int]$ad.TargetObjectVersionConfiguration
+            })
+            @($match).Count | Should -Be 1 -Because 'the level the assessment targets must be one it can name'
+            [int]$ad.TargetObjectVersionDefault | Should -Be 13243
+        }
+
+        It 'claims no Windows Server 2025 functional level Microsoft has not published' {
+            # Windows Server 2025 introduced FFL/DFL level 10, and it is not in the Exchange
+            # supportability matrix. Asserting support Microsoft has not stated is worse than
+            # reporting the level as unlisted.
+            $ad = $script:Thresholds.ActiveDirectory
+            foreach ($key in @('SupportedForestModes', 'RecommendedForestModes', 'SupportedDomainModes', 'RecommendedDomainModes')) {
+                $offenders = @($ad[$key] | Where-Object { $_ -match 'Windows2025' })
+                $offenders | Should -BeNullOrEmpty -Because "$key must not claim an unverified supportability position: $($offenders -join ', ')"
+            }
+        }
+
+        It 'keys the operating system support matrix on real Exchange product families' {
+            $families = @($script:Thresholds.Exchange.Families | ForEach-Object { [string]$_.Name })
+            $matrix = @($script:Thresholds.OperatingSystem.SupportMatrix)
+            $matrix.Count | Should -BeGreaterThan 0
+
+            $bad = foreach ($row in $matrix) {
+                if ([string]$row.Product -notin $families) { "unknown product: $($row.Product)" }
+                foreach ($build in @(@($row.SupportedBuilds) + @($row.MinimumBuild) + @($row.RecommendedBuild))) {
+                    if (-not ($build -as [version])) { "unparseable build '$build' for $($row.Product)" }
+                }
+            }
+            $bad | Should -BeNullOrEmpty -Because "the operating system matrix is malformed: $($bad -join '; ')"
+        }
+
+        It 'judges the operating system against the Exchange version installed on the server' {
+            $run = [pscustomobject]@{ Config = $script:Thresholds; Flags = @{} }
+            $resolve = {
+                param($r, $version, $product) Resolve-ExchOsSupport -Run $r -Version $version -Product $product
+            }
+
+            # Windows Server 2016 under Exchange 2016 is a correct build, and the previous global
+            # floor of Windows Server 2019 reported it as unsupported.
+            $ex2016 = & (Get-Module $script:ModuleName) $resolve $run '10.0.14393.1000' 'Exchange Server 2016'
+            $ex2016.Supported | Should -BeTrue
+            $ex2016.Matched   | Should -BeTrue
+
+            # ...and the same operating system under Exchange Server SE is not.
+            $se = & (Get-Module $script:ModuleName) $resolve $run '10.0.14393.1000' 'Exchange Server SE'
+            $se.Supported | Should -BeFalse
+            $se.Matched   | Should -BeTrue
+
+            # Exchange 2016's supported set has an upper bound as well as a floor.
+            $tooNew = & (Get-Module $script:ModuleName) $resolve $run '10.0.20348.1' 'Exchange Server 2016'
+            $tooNew.Supported | Should -BeFalse
+
+            # A product with no row cannot be judged, and must say so rather than guess.
+            $unknown = & (Get-Module $script:ModuleName) $resolve $run '6.3.9600.1' 'Exchange Server 2013'
+            $unknown.Matched   | Should -BeFalse
+            $unknown.Supported | Should -BeFalse
+        }
+    }
+
+    Context 'Collector scope is honest' {
+
+        It 'reads transport queues per server rather than only the local one' {
+            # Get-Queue with no -Server qualifier implies the local server, so a single call
+            # reports one server's backlog under an organisation-wide rationale.
+            $file = Join-Path $script:CollectorRoot 'TR.QUE-01.TransportQueue.ps1'
+            $file | Should -Exist
+
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$null)
+            $calls = @($ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Get-Queue'
+            }, $true))
+
+            $calls.Count | Should -BeGreaterThan 0 -Because 'the collector must still read queues'
+
+            foreach ($call in $calls) {
+                $scoped = @($call.CommandElements | Where-Object {
+                    $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -eq 'Server'
+                })
+                $scoped.Count | Should -BeGreaterThan 0 -Because 'every Get-Queue call must name the server it is asking'
+            }
+        }
+    }
+
     Context 'Static analysis' {
 
         It 'reports no PSScriptAnalyzer findings for the repository' {

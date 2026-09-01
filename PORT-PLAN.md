@@ -24,6 +24,7 @@ evaluate" from "passed", and the analyzer suspensions below are gone.
 | P9 | Inventory model, threshold configuration, CSV and JSON reporting | Done | 2026-08-31 |
 | P10 | Full-environment collector coverage (see *P10 scope*) | Done | 2026-09-01 |
 | P11 | Exchange Online collection for the tenant side of a hybrid organisation | Done | 2026-09-01 |
+| P12 | Correctness fixes verified against Microsoft Learn: relay permission check, refreshed and externalised build table, 2016/2013 AD preparation levels, functional-level and OS supportability corrections, per-server queue scope | Done | 2026-09-01 |
 
 ## The 5.1 constraint
 
@@ -50,9 +51,16 @@ Two of the four suspensions are gone as of P9 and now fail the build.
 
 The extraction was gated on static analysis and smoke tests only. No collector has been run
 against an Exchange organisation from this repository. Run a full
-`Invoke-ExchAssess.ps1` against a lab organisation and confirm: all 15 collectors return, the
-hash manifest covers every evidence file, the CAB CSV is populated, and the Word report
-generates.
+`Invoke-ExchAssess.ps1` against a lab organisation and confirm: all 32 collectors return, the
+hash manifest covers every file the run produced, `csv/` holds one file per inventory section
+plus `findings.csv`, `run.collectors.csv` and `run.errors.csv`, and `assessment.json` parses
+and carries `inventory`, `findings` and `controls`. Then confirm that every control reports
+either a computed outcome or an explicit `Unknown` with a reason.
+
+Two things to shake out specifically, because CI cannot: the relay permission read in
+`TR.CO-01` needs rights to run `Get-ADPermission` against receive connectors, and `TR.QUE-01`
+needs to reach every transport server. Both report `Unknown` per object rather than failing,
+so the run will succeed either way — check the counts.
 
 ### P4 — Finish the AV exclusion check — Done 2026-08-31
 
@@ -112,7 +120,8 @@ this uncovered.
 
 ### P10 scope — full-environment coverage
 
-Closed. The organisation is now covered by 28 controls:
+Closed. With the four Exchange Online controls added in P11 the organisation is covered by 32
+controls; the thirteen this phase added are:
 
 | Added | Control |
 | --- | --- |
@@ -165,6 +174,22 @@ that into an `Unknown`/`HardFail` finding naming the error rather than losing th
 the failure is visible — but it costs the whole control. Shaking this out is part of P3: run
 against each Exchange version in scope and replace any property that turns out to vary with a
 guarded read.
+
+### P12 — Correctness fixes — Done 2026-09-01
+
+Six fixes, each verified against Microsoft Learn, that had to land before the tool was pointed
+at a real organisation. CHANGELOG carries the detail. In short:
+
+- `TR.CO-01`'s open-relay test was the shape of Microsoft's own default frontend connector, so
+  it returned NonCompliant/High on every correctly built organisation. It now reads the relay
+  permission itself and is three-state.
+- The build table was externalised to `Config/BuildTable.psd1`, refreshed to 2026-09-02, and
+  given a staleness rule of its own.
+- Active Directory preparation levels now cover Exchange 2016 and 2013 as well as 2019 and SE.
+- `Windows2025Forest`/`Windows2025Domain` were removed: Microsoft has not added functional
+  level 10 to the Exchange supportability matrix, so claiming it was an unverified assertion.
+- Operating system supportability is per Exchange version rather than a single global floor.
+- `TR.QUE-01` queries each transport server by name instead of implying the local one.
 
 ### Cosmetic backlog
 

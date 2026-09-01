@@ -26,14 +26,14 @@ Extracted from `infra-scripting-suite/powershell/Assessments/ExchangeAssessment`
 | Control | Covers |
 | --- | --- |
 | `SRV-01` | Server inventory: roles, AD site, required services, server component states |
-| `ENV.VERS-01` | Forest and domain functional levels; Exchange AD preparation (`rangeUpper`, both `objectVersion` values) |
-| `ENV.OS-01` | Server operating system supportability, uptime, free disk |
+| `ENV.VERS-01` | Forest and domain functional levels; Exchange AD preparation (`rangeUpper`, both `objectVersion` values); Schema Master readiness |
+| `ENV.OS-01` | Server operating system supportability for the Exchange version installed on it, uptime, free disk |
 | `EX.CH-01` | Exchange product version, support state, and build currency against a dated build table |
 | `UPG-01` | Exchange Server SE readiness, rolled up from the three above |
 | `MB.DB-01` | Database configuration (paths, size, quotas, retention, circular logging, backups) and copy health |
 | `DAG-01` | DAG membership, witness and quorum, replication networks |
 | `REPL-01` | `Test-ReplicationHealth` per DAG member and MAPI connectivity per mounted database |
-| `TR.CO-01` | Send and receive connectors: open relay, TLS, authentication, size limits |
+| `TR.CO-01` | Send and receive connectors: relay permission, TLS, authentication, size limits |
 | `TR.CFG-01` | Organisation transport config, shadow redundancy, Safety Net, per-server transport, transport and journal rules |
 | `CERT-01` | Certificate expiry, key size, signature algorithm, service bindings, self-signed |
 | `MB.AV-01` | Anti-malware exclusions, reported as what is **missing** per server |
@@ -43,7 +43,7 @@ Extracted from `infra-scripting-suite/powershell/Assessments/ExchangeAssessment`
 | `LOG.EX-01` | Exchange-related error and critical events, grouped by provider and event id |
 | `EX.ADM-01` | Accepted domains, remote domains, email address policies |
 | `EX.VDIR-01` | Nine virtual directory types, Outlook Anywhere, Autodiscover SCP |
-| `TR.QUE-01` | Transport queue depth, age, retry and suspended state |
+| `TR.QUE-01` | Transport queue depth, age, retry and suspended state, per transport server |
 | `RBAC-01` | Role groups, privileged membership, management role assignments and scopes |
 | `MB.INV-01` | Mailbox, quota and archive inventory; external forwarding |
 | `RET-01` | Retention policies and tags, litigation hold, administrator and mailbox audit |
@@ -96,6 +96,18 @@ View-Only Organization Management in Exchange plus domain read covers most colle
 event log and anti-malware exclusion collectors need local administrative rights on the
 Exchange servers.
 
+Two controls need a little more, and say so in their output rather than failing:
+
+- **`TR.CO-01`** runs `Get-ADPermission` against each receive connector to find out whether an
+  anonymous principal actually holds `ms-Exch-SMTP-Accept-Any-Recipient` — the permission that
+  grants relay. Without rights to read connector permissions, or against an Edge Transport
+  server's AD LDS instance, that read fails and the connector is reported as
+  `AnonymousRelayRight = Unknown` with `RelayAssessable = False`. The control then reports
+  `Unknown`/SoftFail naming those connectors, because open relay cannot be ruled out on them.
+  It is never reported as a pass.
+- **`TR.QUE-01`** reads queues on every transport server, not just the local one. A server it
+  cannot reach is named in the finding and makes the control SoftFail.
+
 ## Install
 
 ```powershell
@@ -135,6 +147,9 @@ Import-Module .\src\ExchangeAssessment\ExchangeAssessment.psd1 -Force
 
 # Assess against a client-specific baseline
 .\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -ConfigPath .\contoso-thresholds.psd1
+
+# Judge build currency against a newer copy of Microsoft's build list than the one shipped
+.\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -BuildTablePath .\BuildTable.psd1
 ```
 
 The script returns a summary object carrying `FindingsCount`, `SectionCount`, `CollectorsRun`,
@@ -205,6 +220,26 @@ you leave out keeps the default:
     Database    = @{ MaxBackupAgeDays = 1 }
 }
 ```
+
+### Keeping the build table current
+
+Exchange build currency is judged against
+[`src/ExchangeAssessment/Config/BuildTable.psd1`](src/ExchangeAssessment/Config/BuildTable.psd1),
+a point-in-time copy of Microsoft's
+[build numbers and release dates](https://learn.microsoft.com/exchange/new-features/build-numbers-and-release-dates)
+that carries the date it was last refreshed. Microsoft updates that page every time a
+cumulative update, security update or hotfix ships, so the file goes stale between releases of
+this tool.
+
+Two things follow. A build the table does not know is reported as unverifiable, never as
+current. And once the table itself is older than `Exchange.MaxBuildTableAgeDays` (60 by
+default), `EX.CH-01` says so in its rationale and drops to `PartiallyCompliant` — the tool
+would rather admit the reference is old than quietly imply a server is patched.
+
+To assess against a fresher list without editing the module, copy the file, add the new rows,
+move `TableAsOf`, and pass it with `-BuildTablePath`. A missing or unparseable file is an error
+rather than an empty table, because an empty table reports every server as unverifiable and
+that looks a lot like a clean run.
 
 ## Development
 
