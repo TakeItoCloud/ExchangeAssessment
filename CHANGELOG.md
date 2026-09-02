@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — 2026-09-02 (P12 verification pass)
+
+`ModuleVersion` is **0.2.0**. P12 changed what several controls report, and two runs that say
+different things about the same organisation must not claim to be the same version of the tool.
+PORT-PLAN now carries that as a standing rule.
+
+**Fixed — an unreadable property could still produce a verdict.** P12 replaced direct property
+reads with the guarded `Get-ExchObjectValue`, which returns a caller-supplied default when the
+property is absent. That stopped `Set-StrictMode` from taking a collector down, but it left the
+default deciding the answer: a Receive connector that did not return `PermissionGroups` scored
+`AllowsAnonymous = $false` and so could not be an open relay, a queue that did not return
+`MessageCount` counted as zero messages, and a server that did not return `LastBootUpTime` passed
+the uptime check. Each is a pass nothing measured.
+
+`Test-ExchObjectProperty` and `Get-ExchMissingProperty` now separate "the property is not there"
+from "the property is there and null" — a distinction that matters, because a Send connector
+whose `TlsAuthLevel` is null is a finding while one that never returned the field is not. Every
+control presence-checks the properties its verdict reads, and reports an object missing any of
+them as not assessable, naming the property:
+
+- **`TR.CO-01`** judges on `Enabled`, `PermissionGroups`, `AuthMechanism`, `RemoteIPRanges` and
+  `RequireTLS` for a Receive connector, and `Enabled`, `AddressSpaces` and `TlsAuthLevel` for a
+  Send connector. Connectors missing any are excluded from the relay and Basic-authentication
+  verdicts and reported `Unknown`/SoftFail instead. `RelayAssessable` now covers this as well as
+  an unreadable permission, and an access control entry that does not carry `Deny`, `IsInherited`
+  or `User` makes the whole connector's answer `Unknown` — an absent `Deny` read as "allow" would
+  invent a grant, and an absent `User` read as "not anonymous" would hide one. New
+  `UnreadableProperties` column on both connector sections.
+- **`TR.QUE-01`** judges on `Identity`, `Status`, `MessageCount` and `LastRetryTime`. Queues
+  missing any are excluded from the depth, retry, suspended, poison and age checks and from the
+  message total, and reported `Unknown`/SoftFail.
+- **`ENV.OS-01`** separates a server that did not return `AdminDisplayVersion` from one whose
+  Exchange version has no operating system row — both `Unknown`, but they are different problems
+  with different remediation — and no longer passes the uptime check on a server that did not
+  return `LastBootUpTime`. New `VersionRead`, `UptimeAssessable` and `UnreadableProperties`
+  columns.
+
+**Fixed — `Resolve-ExchBuild -Table` is mandatory.** It was optional, falling back to
+`Get-ExchBuildTable` with no run context, so a run started with `-BuildTablePath` could have been
+judged against the table shipped in the repository instead of the operator's. The `-Run`
+parameter is gone with it; the caller loads the table once from the run and hands it over. A test
+asserts the parameter stays mandatory.
+
+**Dropped** — PORT-PLAN phases P6 (ignore list, alerting, scheduled runs) and P8 (packaging and
+first tagged release), each with its reason recorded in that file rather than left `Planned`
+indefinitely.
+
+**Tests** — three added: a Receive connector missing a judged property is not assessable and
+yields `Unknown`/SoftFail naming it; a null property value is data while an absent one is not;
+and `Resolve-ExchBuild` requires `-Table`.
+
 ### Fixed — 2026-09-01 (phase P12)
 
 Six correctness fixes, each checked against Microsoft Learn before it was written. Every one of

@@ -18,13 +18,13 @@ evaluate" from "passed", and the analyzer suspensions below are gone.
 | P3 | Runtime verification against a live Exchange organisation | Planned | |
 | P4 | Finish the AV exclusion check — compare, do not just report | Done | 2026-08-31 |
 | P5 | Operational health checks: service, mail flow, replication, queues, index | Done | 2026-09-01 |
-| P6 | Ignore list, alerting and scheduled-run modes | Planned | |
+| P6 | Ignore list, alerting and scheduled-run modes | Dropped | 2026-09-02 |
 | P7 | Operational documentation output | Superseded by P9 | 2026-08-31 |
-| P8 | Packaging and first tagged release | Planned | |
+| P8 | Packaging and first tagged release | Dropped | 2026-09-02 |
 | P9 | Inventory model, threshold configuration, CSV and JSON reporting | Done | 2026-08-31 |
 | P10 | Full-environment collector coverage (see *P10 scope*) | Done | 2026-09-01 |
 | P11 | Exchange Online collection for the tenant side of a hybrid organisation | Done | 2026-09-01 |
-| P12 | Correctness fixes verified against Microsoft Learn: relay permission check, refreshed and externalised build table, 2016/2013 AD preparation levels, functional-level and OS supportability corrections, per-server queue scope | Done | 2026-09-01 |
+| P12 | Correctness fixes verified against Microsoft Learn: relay permission check, refreshed and externalised build table, 2016/2013 AD preparation levels, functional-level and OS supportability corrections, per-server queue scope | Done | 2026-09-02 |
 
 ## The 5.1 constraint
 
@@ -96,10 +96,20 @@ Take the **ideas**, not the code. Neither should be vendored here.
 `DAG-01` and `MB.DB-01` already collect the static shape of both; adding the live queue and
 index state turns them from an inventory into a health check.
 
-**P6 — ignore list and alerting (same source).** That script supports an `ignorelist.txt` for
-servers, DAGs and databases that should be skipped (test and dev boxes), plus an
-`-AlertsOnly` mode that emails only when something is actually wrong. Both are what make a
-check runnable on a schedule instead of on demand. This tool has neither.
+**P6 — ignore list and alerting (same source). Dropped 2026-09-02.** That script supports an
+`ignorelist.txt` for servers, DAGs and databases that should be skipped, plus an `-AlertsOnly`
+mode that emails only when something is actually wrong. Both belong to a monitoring tool that
+runs on a schedule and tells you when today differs from yesterday.
+
+Dropped because this is not that tool and the two goals pull against each other. This is a
+point-in-time assessment run by a consultant against a client organisation: every control
+reports, the operator reads the whole report once, and the value is in the completeness. An
+ignore list is a way to make a finding disappear without fixing it, which is precisely what the
+"no silent pass" rule exists to prevent - a client-specific baseline belongs in `-ConfigPath`,
+where the changed threshold is visible in the run's own configuration rather than hidden in a
+list of exemptions. Alerting needs somewhere to send the alert and a previous run to compare
+against, neither of which this tool has. Anyone wanting scheduled monitoring should run a
+monitoring product; the artifact this tool produces is a report, not a signal.
 
 **P7 — operational documentation (from `Exc.Doc`).** That documenter separates *collection*
 from *rendering*: collect on a server into a `Data\` folder, then generate the Word document
@@ -109,6 +119,19 @@ already leans that way — its Word step is a Python helper), and content config
 section can be dropped from a client deliverable without touching code. Its output is
 *operational documentation* rather than an audit finding set, which is a genuinely different
 deliverable from the same evidence.
+
+### P8 — Packaging and first tagged release — Dropped 2026-09-02
+
+`build/package.ps1` already writes `dist/ExchangeAssessment-v<version>.zip`, and the module
+imports from a clone with no build step, so the packaging half of the phase is done and needs
+no phase of its own. The tagged release half is dropped rather than deferred: PORT-PLAN P3 -
+running this against a real Exchange organisation - has never happened, and tagging a release
+of an assessment tool that has never been pointed at the thing it assesses would put a version
+number on an untested claim. P12 exists because reading the code carefully found six answers it
+was getting wrong; only a real run will find the rest.
+
+The `ModuleVersion` bump that a release would have carried now happens per phase instead, under
+the rule below. When P3 closes, open a release phase then, with the run behind it.
 
 ### P9 — Inventory, thresholds and reporting — Done 2026-08-31
 
@@ -205,6 +228,12 @@ objects are correct.
   Anything short of that stays `In progress`.
 - Every phase updates **this file** (Status and Date on its row) and **CHANGELOG.md**
   (an entry under `## [Unreleased]`) in the same commit as the code.
+- **A phase that changes what a finding says bumps `ModuleVersion` in the same commit.** Any
+  change to an outcome, a severity, a rationale, or the set of controls counts - two runs
+  reporting different things about the same organisation must not claim to be the same version
+  of the tool. Reports carry the version, so this is what lets a reader tell "the organisation
+  changed" from "the tool changed its mind". Minor version for changed findings, patch for
+  fixes that leave every finding identical.
 - Nothing is deferred silently. Work moved out of a phase becomes a **new row** in the
   table above with its own scope and `Planned` status — it is never dropped in a comment
   or left implicit in the commit message.

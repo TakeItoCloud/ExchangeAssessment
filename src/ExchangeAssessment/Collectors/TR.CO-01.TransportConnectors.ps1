@@ -25,6 +25,12 @@ relay was ruled out, and a failed read cannot say that.
 
 TLS level, authentication mechanism and message size limits are evaluated rather than merely
 recorded.
+
+Every property this control judges on is presence-checked before it is judged. A connector that
+did not return one of them is reported as not assessable, naming the property, rather than
+having a default stand in for it - a missing PermissionGroups defaulting to empty would turn a
+real open relay into a pass, and a missing RequireTLS defaulting to false would invent a finding
+nothing measured.
 #>
 
 Set-StrictMode -Version Latest
@@ -72,11 +78,18 @@ function Invoke-ExchCollector_TR_CO_01_TransportConnectors {
     $securedMechanism  = [string](Get-ExchThreshold -Run $Run -Name 'Transport.ExternallySecuredAuthMechanism'   -Default 'ExternalAuthoritative')
     $securedGroup      = [string](Get-ExchThreshold -Run $Run -Name 'Transport.ExternallySecuredPermissionGroup' -Default 'ExchangeServers')
 
+    # The properties each verdict depends on. Anything not on these lists is inventory: an
+    # unreadable inventory field is a blank cell, an unreadable judged field is an Unknown.
+    $judgedSendProperties    = @('Enabled', 'AddressSpaces', 'TlsAuthLevel')
+    $judgedReceiveProperties = @('Enabled', 'PermissionGroups', 'AuthMechanism', 'RemoteIPRanges', 'RequireTLS')
+
     $sendRows = New-Object System.Collections.Generic.List[object]
     foreach ($c in $send) {
         $addressSpaces = ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $c -Name 'AddressSpaces')
         $tlsLevel = [string](Get-ExchObjectValue -InputObject $c -Name 'TlsAuthLevel' -Default '')
         $toInternet = ($addressSpaces -match '(^|;)(SMTP:)?\*(;|:|$)')
+
+        $sendUnreadable = Get-ExchMissingProperty -InputObject $c -Name $judgedSendProperties
 
         $sendRows.Add([pscustomobject]@{
             Name           = [string](Get-ExchObjectValue -InputObject $c -Name 'Name' -Default '')
@@ -91,6 +104,8 @@ function Invoke-ExchCollector_TR_CO_01_TransportConnectors {
             SourceTransportServers = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $c -Name 'SourceTransportServers'))
             MaxMessageSize = [string](Get-ExchObjectValue -InputObject $c -Name 'MaxMessageSize' -Default '')
             Fqdn           = [string](Get-ExchObjectValue -InputObject $c -Name 'Fqdn' -Default '')
+            UnreadableProperties = $sendUnreadable
+            Assessable     = [bool](-not $sendUnreadable)
         }) | Out-Null
     }
 
@@ -102,7 +117,8 @@ function Invoke-ExchCollector_TR_CO_01_TransportConnectors {
 
         $receiveRows.Add((New-ExchReceiveConnectorRow -Connector $c -AnonymousGroups $anonymousGroups `
             -KnownUnrestricted $unrestricted -AnonymousRelayRight $relayRight `
-            -ExternallySecuredGroup $securedGroup -ExternallySecuredMechanism $securedMechanism)) | Out-Null
+            -ExternallySecuredGroup $securedGroup -ExternallySecuredMechanism $securedMechanism `
+            -JudgedProperties $judgedReceiveProperties)) | Out-Null
     }
 
     $sendArr = @($sendRows.ToArray())
@@ -118,19 +134,24 @@ function Invoke-ExchCollector_TR_CO_01_TransportConnectors {
 
     $sections = @(
         New-ExchInventorySection -Run $Run -Key 'transport.send-connectors' -Title 'Send Connectors' -Area 'Transport' `
-            -Columns @('Name', 'Enabled', 'AddressSpaces', 'ToInternet', 'DNSRoutingEnabled', 'SmartHosts', 'TlsAuthLevel', 'RequireTLS', 'TlsDomain', 'SourceTransportServers', 'MaxMessageSize', 'Fqdn') `
+            -Columns @('Name', 'Enabled', 'AddressSpaces', 'ToInternet', 'DNSRoutingEnabled', 'SmartHosts', 'TlsAuthLevel', 'RequireTLS', 'TlsDomain', 'SourceTransportServers', 'MaxMessageSize', 'Fqdn', 'Assessable', 'UnreadableProperties') `
             -Rows $sendArr
 
         New-ExchInventorySection -Run $Run -Key 'transport.receive-connectors' -Title 'Receive Connectors' -Area 'Transport' `
-            -Columns @('Name', 'Server', 'Enabled', 'Bindings', 'RemoteIPRanges', 'PermissionGroups', 'AuthMechanism', 'Fqdn', 'RequireTLS', 'MaxMessageSize', 'RequireEHLODomain', 'AllowsAnonymous', 'UnrestrictedRange', 'AnonymousRelayRight', 'ExternallySecured', 'RelayAssessable', 'OpenRelay') `
+            -Columns @('Name', 'Server', 'Enabled', 'Bindings', 'RemoteIPRanges', 'PermissionGroups', 'AuthMechanism', 'Fqdn', 'RequireTLS', 'MaxMessageSize', 'RequireEHLODomain', 'AllowsAnonymous', 'UnrestrictedRange', 'AnonymousRelayRight', 'ExternallySecured', 'RelayAssessable', 'UnreadableProperties', 'OpenRelay') `
             -Rows $recvArr
     )
 
     $relay = Get-ExchRelayAssessment -Rows $recvArr
-    $noTls = @($sendArr | Where-Object { $_.Enabled -and $_.ToInternet -and $requiredTlsLevels.Count -gt 0 -and ($requiredTlsLevels -notcontains $_.TlsAuthLevel) })
+
+    # Only connectors that returned every property the test needs are judged. The rest are
+    # counted as Unknown below, naming what was missing.
+    $sendUnassessable = @($sendArr | Where-Object { -not $_.Assessable })
+    $noTls = @($sendArr | Where-Object { $_.Assessable -and $_.Enabled -and $_.ToInternet -and $requiredTlsLevels.Count -gt 0 -and ($requiredTlsLevels -notcontains $_.TlsAuthLevel) })
     $basicAuth = @($recvArr | Where-Object {
         $row = $_
-        $row.Enabled -and @($discouragedAuth | Where-Object { $row.AuthMechanism -match [regex]::Escape($_) }).Count -gt 0 -and -not $row.RequireTLS
+        -not $row.UnreadableProperties -and $row.Enabled -and
+        @($discouragedAuth | Where-Object { $row.AuthMechanism -match [regex]::Escape($_) }).Count -gt 0 -and -not $row.RequireTLS
     })
 
     $problems = New-Object System.Collections.Generic.List[string]
@@ -150,6 +171,11 @@ function Invoke-ExchCollector_TR_CO_01_TransportConnectors {
             (($noTls | ForEach-Object { $_.Name }) -join ', '))) | Out-Null
         $outcomes.Add('PartiallyCompliant') | Out-Null
     }
+    if ($sendUnassessable.Count -gt 0) {
+        $problems.Add(("{0} send connectors did not return every property this control judges on, so they were not assessed: {1}" -f `
+            $sendUnassessable.Count, (($sendUnassessable | ForEach-Object { "$($_.Name) (missing $($_.UnreadableProperties))" }) -join ', '))) | Out-Null
+        $outcomes.Add('Unknown') | Out-Null
+    }
     if ($sendErr) { $problems.Add("Send connectors could not be read: $sendErr") | Out-Null; $outcomes.Add('Unknown') | Out-Null }
     if ($recvErr) { $problems.Add("Receive connectors could not be read: $recvErr") | Out-Null; $outcomes.Add('Unknown') | Out-Null }
     if ($problems.Count -eq 0) { $outcomes.Add('Compliant') | Out-Null }
@@ -168,7 +194,7 @@ function Invoke-ExchCollector_TR_CO_01_TransportConnectors {
                          $sendArr.Count, $recvArr.Count, $relayPermission)
                  }
 
-    $degraded = ($sendErr -or $recvErr -or $relay.Sufficiency -eq 'SoftFail')
+    $degraded = ($sendErr -or $recvErr -or $relay.Sufficiency -eq 'SoftFail' -or $sendUnassessable.Count -gt 0)
     $stateReason = @(@($sendErr, $recvErr) + @($permissionErrors.ToArray()) | Where-Object { $_ }) -join '; '
 
     $finding = New-ExchControlFinding -Control $control -Severity $severity -Outcome $outcome `
@@ -181,6 +207,7 @@ function Invoke-ExchCollector_TR_CO_01_TransportConnectors {
             receiveConnectors = $recvArr.Count
             openRelays        = @($relay.OpenRelays).Count
             unassessableRelay = @($relay.Unassessable).Count
+            unassessableSend  = $sendUnassessable.Count
             sendWithoutTls    = $noTls.Count
             basicWithoutTls   = $basicAuth.Count
         } `
@@ -203,8 +230,14 @@ function New-ExchReceiveConnectorRow {
         [Parameter()][string[]]$KnownUnrestricted = @(),
         [Parameter(Mandatory)][ValidateSet('Granted', 'NotGranted', 'Unknown')][string]$AnonymousRelayRight,
         [Parameter()][string]$ExternallySecuredGroup = 'ExchangeServers',
-        [Parameter()][string]$ExternallySecuredMechanism = 'ExternalAuthoritative'
+        [Parameter()][string]$ExternallySecuredMechanism = 'ExternalAuthoritative',
+        # The properties the relay and TLS verdicts read. A connector missing any of them is
+        # not assessable, because the default that stands in for the missing value would decide
+        # the verdict on its own.
+        [Parameter()][string[]]$JudgedProperties = @('Enabled', 'PermissionGroups', 'AuthMechanism', 'RemoteIPRanges', 'RequireTLS')
     )
+
+    $unreadable = Get-ExchMissingProperty -InputObject $Connector -Name $JudgedProperties
 
     $permissionGroups = ConvertTo-ExchEnumName -Value (Get-ExchObjectValue -InputObject $Connector -Name 'PermissionGroups') `
         -EnumType 'Microsoft.Exchange.Data.Directory.SystemConfiguration.PermissionGroups'
@@ -242,7 +275,8 @@ function New-ExchReceiveConnectorRow {
         UnrestrictedRange= $unrestrictedRange
         AnonymousRelayRight = $AnonymousRelayRight
         ExternallySecured= $externallySecured
-        RelayAssessable  = ($AnonymousRelayRight -ne 'Unknown')
+        UnreadableProperties = $unreadable
+        RelayAssessable  = (($AnonymousRelayRight -ne 'Unknown') -and -not $unreadable)
         OpenRelay        = ($enabled -and $unrestrictedRange -and $relays)
     }
 }
@@ -253,8 +287,9 @@ function Get-ExchRelayAssessment {
 
     A connector that is anonymous and unrestricted but does not carry the relay permission is
     Microsoft's default build and is deliberately not reported as a problem. A connector whose
-    permissions could not be read is reported as not assessable, which contributes an Unknown
-    outcome and a SoftFail - partial coverage must never read as a clean pass.
+    permissions could not be read, or which did not return one of the properties the test reads,
+    is reported as not assessable - an Unknown outcome and a SoftFail naming the connector and
+    what was missing. Partial coverage must never read as a clean pass.
     #>
     [CmdletBinding()]
     param([Parameter()][object[]]$Rows = @())
@@ -283,9 +318,17 @@ function Get-ExchRelayAssessment {
         $outcomes.Add('NonCompliant') | Out-Null
     }
 
-    if ($unassessable.Count -gt 0) {
+    $permissionUnread = @($unassessable | Where-Object { $_.AnonymousRelayRight -eq 'Unknown' })
+    if ($permissionUnread.Count -gt 0) {
         $problems.Add(("The relay permission could not be read on {0} receive connectors, so open relay could not be ruled out on them: {1}" -f `
-            $unassessable.Count, (($unassessable | ForEach-Object { "$($_.Server)\$($_.Name)" }) -join ', '))) | Out-Null
+            $permissionUnread.Count, (($permissionUnread | ForEach-Object { "$($_.Server)\$($_.Name)" }) -join ', '))) | Out-Null
+        $outcomes.Add('Unknown') | Out-Null
+    }
+
+    $propertyUnread = @($unassessable | Where-Object { $_.UnreadableProperties })
+    if ($propertyUnread.Count -gt 0) {
+        $problems.Add(("{0} receive connectors did not return every property this control judges on, so open relay could not be ruled out on them: {1}" -f `
+            $propertyUnread.Count, (($propertyUnread | ForEach-Object { "$($_.Server)\$($_.Name) (missing $($_.UnreadableProperties))" }) -join ', '))) | Out-Null
         $outcomes.Add('Unknown') | Out-Null
     }
 
@@ -308,7 +351,10 @@ function Test-ExchAnonymousRelayGranted {
     failed" has to stay distinguishable from "the right is not there".
 
     The Deny/IsInherited filter is the one Microsoft documents for reading connector
-    permissions: an inherited or denied entry does not grant the connector anything.
+    permissions: an inherited or denied entry does not grant the connector anything. An entry
+    that does not carry Deny, IsInherited or User cannot be filtered on, so the whole answer
+    becomes Unknown rather than a verdict resting on a default - treating an absent Deny as
+    "allow" would invent a grant, and an absent User as "not anonymous" would hide one.
     #>
     [CmdletBinding()]
     param(
@@ -337,6 +383,12 @@ function Test-ExchAnonymousRelayGranted {
     if ($Errors.Count -gt $before) { return 'Unknown' }
 
     foreach ($entry in $permissions) {
+        $missing = Get-ExchMissingProperty -InputObject $entry -Name @('Deny', 'IsInherited', 'User')
+        if ($missing) {
+            $Errors.Add(("Get-ADPermission on receive connector {0}: an access control entry did not carry {1}, so the relay permission could not be judged." -f $identity, $missing)) | Out-Null
+            return 'Unknown'
+        }
+
         if ([bool](Get-ExchObjectValue -InputObject $entry -Name 'Deny' -Default $false)) { continue }
         if ([bool](Get-ExchObjectValue -InputObject $entry -Name 'IsInherited' -Default $false)) { continue }
 

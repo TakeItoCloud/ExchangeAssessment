@@ -132,3 +132,75 @@ function Get-ExchObjectValue {
     if ($null -eq $value) { return $Default }
     return $value
 }
+
+function Test-ExchObjectProperty {
+    <#
+    True when the object actually carries the property.
+
+    Deliberately distinct from Get-ExchObjectValue, which cannot tell "the property is not
+    there" from "the property is there and null". That distinction is the whole point: a
+    Receive connector whose TlsAuthLevel is null is a finding, while one that never returned a
+    TlsAuthLevel at all is something the tool could not read - and those two must not produce
+    the same verdict.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()]$InputObject,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Name
+    )
+
+    if ($null -eq $InputObject) { return $false }
+
+    if ($InputObject -is [System.Collections.IDictionary]) { return $InputObject.Contains($Name) }
+
+    return [bool]($InputObject.PSObject.Properties.Match($Name) | Select-Object -First 1)
+}
+
+function Get-ExchMissingProperty {
+    <#
+    Names the properties an object does not carry, out of the set a caller has to be able to
+    read before it may reach a verdict.
+
+    Returns a ';'-joined string rather than an array: it goes straight into an inventory column,
+    and a string cannot unroll to $null on return the way an empty collection can.
+
+    A caller passes the properties its judgement depends on - not everything it reports. An
+    unreadable inventory field is a blank cell; an unreadable judged field has to become Unknown
+    with the field named, because a default value silently becomes a pass or a fail that nothing
+    measured.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()]$InputObject,
+        [Parameter()][string[]]$Name = @()
+    )
+
+    $missing = New-Object System.Collections.Generic.List[string]
+    foreach ($property in @($Name)) {
+        if (-not (Test-ExchObjectProperty -InputObject $InputObject -Name $property)) {
+            $missing.Add($property) | Out-Null
+        }
+    }
+
+    return ($missing.ToArray() -join ';')
+}
+
+function Get-ExchSum {
+    <#
+    Sums one property across a collection, returning 0 for an empty one.
+
+    Measure-Object returns nothing at all when handed no input, and reading .Sum off nothing is
+    a terminating error under Set-StrictMode. A run against an organisation that happens to
+    have none of something should report zero, not fall over.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()][object[]]$InputObject = @(),
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Property
+    )
+
+    $measured = @(@($InputObject) | Measure-Object -Property $Property -Sum)
+    if ($measured.Count -eq 0 -or $null -eq $measured[0].Sum) { return 0 }
+
+    return $measured[0].Sum
+}

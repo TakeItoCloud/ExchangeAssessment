@@ -1,6 +1,6 @@
 @{
     RootModule        = 'ExchangeAssessment.psm1'
-    ModuleVersion     = '0.1.0'
+    ModuleVersion     = '0.2.0'
     GUID              = 'ea1e88ee-6d63-40ec-bb48-4a715579c109'
     Author            = 'Carlos Annes'
     CompanyName       = 'Caannes IT Consulting'
@@ -33,7 +33,7 @@
             Tags         = @('Exchange','Hybrid','Security','Audit','Evidence')
             ProjectUri   = 'https://github.com/TakeItoCloud/ExchangeAssessment'
             LicenseUri   = ''
-            ReleaseNotes = 'Initial extraction from infra-scripting-suite.'
+            ReleaseNotes = 'P12: relay detection, build table, AD preparation levels, OS supportability and queue scope corrected against Microsoft Learn. Findings changed; see CHANGELOG.md.'
         }
     }
 }

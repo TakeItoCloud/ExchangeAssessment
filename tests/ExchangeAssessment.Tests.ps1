@@ -561,6 +561,36 @@ Describe 'ExchangeAssessment' {
             ($assessment.Problems -join ' ') | Should -Match 'could not be ruled out'
         }
 
+        It 'will not judge a connector that did not return a property the test reads' {
+            # A default standing in for an unread property decides the verdict on its own: an
+            # absent PermissionGroups would turn a real open relay into a pass, and an absent
+            # RequireTLS would invent a finding nothing measured.
+            $partial = New-TestConnector
+            $partial.PSObject.Properties.Remove('PermissionGroups')
+
+            $row = Get-TestRelayRow -Connector $partial -Right 'NotGranted'
+            $row.UnreadableProperties | Should -Be 'PermissionGroups'
+            $row.RelayAssessable | Should -BeFalse
+
+            $assessment = Get-TestRelayAssessment -Row $row
+            $assessment.Outcomes | Should -Contain 'Unknown'
+            $assessment.Sufficiency | Should -Be 'SoftFail'
+            ($assessment.Problems -join ' ') | Should -Match 'missing PermissionGroups'
+        }
+
+        It 'treats a null property value as data and an absent property as unreadable' {
+            # TlsAuthLevel is legitimately null on a Send connector that does not require TLS,
+            # and that is exactly the case this control exists to flag. Only an absent property
+            # is unreadable.
+            $present = New-TestConnector
+            $present.RequireTLS = $null
+            (Get-TestRelayRow -Connector $present -Right 'NotGranted').UnreadableProperties | Should -Be ''
+
+            $absent = New-TestConnector
+            $absent.PSObject.Properties.Remove('RequireTLS')
+            (Get-TestRelayRow -Connector $absent -Right 'NotGranted').UnreadableProperties | Should -Be 'RequireTLS'
+        }
+
         It 'does not mistake ExchangeLegacyServers for ExchangeServers' {
             $connector = New-TestConnector -PermissionGroups 'ExchangeLegacyServers' -AuthMechanism 'ExternalAuthoritative'
             $row = Get-TestRelayRow -Connector $connector -Right 'NotGranted'
@@ -614,6 +644,28 @@ Describe 'ExchangeAssessment' {
         It 'lists no build twice' {
             $duplicates = $script:BuildTable.Builds | Group-Object -Property Build | Where-Object Count -gt 1 | ForEach-Object Name
             $duplicates | Should -BeNullOrEmpty -Because "duplicated builds: $($duplicates -join ', ')"
+        }
+
+        It 'requires the caller to hand it the table it should judge against' {
+            # -Table was optional once, falling back to the table shipped in the repository. A
+            # run started with -BuildTablePath would then have been judged against the wrong
+            # one, silently.
+            $attribute = (& (Get-Module $script:ModuleName) { (Get-Command Resolve-ExchBuild).Parameters['Table'] }).Attributes |
+                Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] } | Select-Object -First 1
+            $attribute.Mandatory | Should -BeTrue -Because 'a fallback to the in-repo table would ignore -BuildTablePath'
+        }
+
+        It 'sums an empty collection to zero rather than throwing' {
+            # Measure-Object returns nothing for an empty set, and .Sum on nothing is a
+            # terminating error under Set-StrictMode. This took out TR.QUE-01 whenever every
+            # queue was excluded as unassessable, and would have done the same to an
+            # organisation whose transport servers returned no queues at all.
+            $sum = & (Get-Module $script:ModuleName) { Get-ExchSum -InputObject @() -Property 'MessageCount' }
+            $sum | Should -Be 0
+
+            $rows = @([pscustomobject]@{ MessageCount = 3 }, [pscustomobject]@{ MessageCount = 4 })
+            $counted = & (Get-Module $script:ModuleName) { param($r) Get-ExchSum -InputObject $r -Property 'MessageCount' } $rows
+            $counted | Should -Be 7
         }
 
         It 'refuses a missing build table rather than falling back to an empty one' {

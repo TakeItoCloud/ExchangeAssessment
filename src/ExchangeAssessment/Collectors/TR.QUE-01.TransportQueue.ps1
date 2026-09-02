@@ -11,6 +11,10 @@ Get-QueueDigest is deliberately not used instead: it only returns queues holding
 messages, its data is one to two minutes old, it excludes subscribed Edge Transport servers, and
 it does not carry the retry age or LastError this control reports.
 
+Every property the depth and age verdicts read is presence-checked first. A queue that did not
+return one of them is reported as not assessable, naming the property, rather than defaulting to
+a zero message count that would read as a queue with nothing in it.
+
 A point-in-time read. A queue with a few messages in it is normal; a queue that is deep, old, or
 in Retry is mail that is not being delivered right now. The finding says explicitly that this is
 one sample, because a queue that is draining looks the same as one that is stuck if you only
@@ -85,8 +89,13 @@ function Invoke-ExchCollector_TR_QUE_01_TransportQueue {
     $maxAgeHours = [double](Get-ExchThreshold -Run $Run -Name 'Transport.MaxQueueAgeHours' -Default 4)
     $now = Get-Date
 
+    # LastRetryTime is on this list because a queue that has never retried returns it as null,
+    # which is data; a queue that never returned the property at all is not.
+    $judgedQueueProperties = @('Identity', 'Status', 'MessageCount', 'LastRetryTime')
+
     $rows = foreach ($entry in $queues) {
         $q = $entry.Queue
+        $unreadable = Get-ExchMissingProperty -InputObject $q -Name $judgedQueueProperties
         $lastRetry = Get-ExchObjectValue -InputObject $q -Name 'LastRetryTime'
         $ageHours = $null
         try {
@@ -105,6 +114,8 @@ function Invoke-ExchCollector_TR_QUE_01_TransportQueue {
             LastRetryTime   = $lastRetry
             RetryAgeHours   = $ageHours
             IsValid         = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $q -Name 'IsValid'))
+            UnreadableProperties = $unreadable
+            Assessable      = [bool](-not $unreadable)
         }
     }
     $queueArr = @($rows)
@@ -120,18 +131,23 @@ function Invoke-ExchCollector_TR_QUE_01_TransportQueue {
 
     $sections = @(
         New-ExchInventorySection -Run $Run -Key 'transport.queues' -Title 'Transport Queues' -Area 'Transport' `
-            -Columns @('Server', 'Identity', 'DeliveryType', 'Status', 'MessageCount', 'NextHopDomain', 'RetryAgeHours', 'LastRetryTime', 'LastError', 'IsValid') `
+            -Columns @('Server', 'Identity', 'DeliveryType', 'Status', 'MessageCount', 'NextHopDomain', 'RetryAgeHours', 'LastRetryTime', 'LastError', 'IsValid', 'Assessable', 'UnreadableProperties') `
             -Rows $queueArr -HighCardinality
     )
 
+    # Only queues that returned every judged property are counted. The rest become Unknown
+    # below, named with what was missing.
+    $unassessable = @($queueArr | Where-Object { -not $_.Assessable })
+    $judgeable    = @($queueArr | Where-Object { $_.Assessable })
+
     # Poison and Submission always exist and are not backlogs in themselves.
-    $delivery = @($queueArr | Where-Object { $_.Identity -notmatch 'Poison$|Submission$' })
+    $delivery = @($judgeable | Where-Object { $_.Identity -notmatch 'Poison$|Submission$' })
     $deep     = @($delivery | Where-Object { $_.MessageCount -gt $critDepth })
     $growing  = @($delivery | Where-Object { $_.MessageCount -gt $warnDepth -and $_.MessageCount -le $critDepth })
     $retrying = @($delivery | Where-Object { $_.Status -match 'Retry' })
     $suspended= @($delivery | Where-Object { $_.Status -match 'Suspended' })
     $stale    = @($delivery | Where-Object { $null -ne $_.RetryAgeHours -and $_.RetryAgeHours -gt $maxAgeHours })
-    $poison   = @($queueArr | Where-Object { $_.Identity -match 'Poison$' -and $_.MessageCount -gt 0 })
+    $poison   = @($judgeable | Where-Object { $_.Identity -match 'Poison$' -and $_.MessageCount -gt 0 })
 
     $problems = New-Object System.Collections.Generic.List[string]
     $outcomes = New-Object System.Collections.Generic.List[string]
@@ -164,6 +180,11 @@ function Invoke-ExchCollector_TR_QUE_01_TransportQueue {
         $problems.Add(("{0} queues hold more than {1} messages" -f $growing.Count, $warnDepth)) | Out-Null
         $outcomes.Add('PartiallyCompliant') | Out-Null
     }
+    if ($unassessable.Count -gt 0) {
+        $problems.Add(("{0} queues did not return every property this control judges on, so their depth and age are unknown: {1}" -f `
+            $unassessable.Count, (($unassessable | ForEach-Object { "{0} (missing {1})" -f (Get-ExchQueueLabel -Row $_), $_.UnreadableProperties }) -join ', '))) | Out-Null
+        $outcomes.Add('Unknown') | Out-Null
+    }
     if ($unreached.Count -gt 0) {
         $problems.Add(("{0} of {1} transport servers did not return their queues, so their backlog is unknown: {2}" -f `
             $unreached.Count, $queried.Count, (($unreached.ToArray()) -join ', '))) | Out-Null
@@ -183,14 +204,19 @@ function Invoke-ExchCollector_TR_QUE_01_TransportQueue {
         default              { 'Low' }
     }
 
-    $total = ($queueArr | Measure-Object -Property MessageCount -Sum).Sum
+    # Measure-Object returns nothing at all for an empty set, and .Sum on nothing throws under
+    # Set-StrictMode. That is reachable now that a queue can be excluded as unassessable, and was
+    # already reachable in an organisation whose transport servers returned no queues.
+    $total = 0
+    $measured = @($judgeable | Measure-Object -Property MessageCount -Sum)
+    if ($measured.Count -gt 0 -and $null -ne $measured[0].Sum) { $total = [int]$measured[0].Sum }
     $scope = "{0} of {1} transport servers returned queue data ({2})." -f $answered.Count, $queried.Count, (($answered.ToArray()) -join ', ')
     $rationale = if ($problems.Count -gt 0) { $scope + ' ' + ($problems -join '. ') + '.' }
-                 else { "{0} {1} queues hold {2} messages in total, none in Retry or Suspended." -f $scope, $queueArr.Count, $total }
+                 else { "{0} {1} queues hold {2} messages in total, none in Retry or Suspended." -f $scope, $judgeable.Count, $total }
     $rationale += ' This is a single sample: a queue that is draining and one that is stuck look the same from one reading.'
 
     $finding = New-ExchControlFinding -Control $control -Severity $severity -Outcome $outcome `
-        -Sufficiency $(if ($errors.Count -gt 0 -or $unreached.Count -gt 0) { 'SoftFail' } else { 'Pass' }) `
+        -Sufficiency $(if ($errors.Count -gt 0 -or $unreached.Count -gt 0 -or $unassessable.Count -gt 0) { 'SoftFail' } else { 'Pass' }) `
         -Rationale $rationale `
         -Evidence @($evidence) `
         -Remediation 'Work the queues in Retry first - the LastError column names the reason, usually DNS, a smart host, or a remote server refusing the connection. Resume suspended queues once the cause is understood, and review the poison queue by hand.' `
@@ -198,6 +224,7 @@ function Invoke-ExchCollector_TR_QUE_01_TransportQueue {
             serversQueried  = $queried.Count
             serversAnswered = $answered.Count
             queueCount      = $queueArr.Count
+            unassessableQueues = $unassessable.Count
             totalMessages   = $total
             deepQueues      = $deep.Count
             retryingQueues  = $retrying.Count

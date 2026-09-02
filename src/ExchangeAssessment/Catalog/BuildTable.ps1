@@ -73,17 +73,17 @@ function Resolve-ExchBuild {
     build is ahead of everything the table knows for that product - which means the table is
     behind, not that the server is wrong.
 
-    Pass -Table to reuse an already loaded table rather than reading the file once per server.
+    -Table is mandatory, and deliberately so. It used to be optional with a fall back to
+    Get-ExchBuildTable, which meant a run started with -BuildTablePath could silently be judged
+    against the table shipped in the repository instead of the operator's - the caller loads the
+    table once, from the run, and hands it here.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Build,
-        [Parameter()][string]$Product = '',
-        [Parameter()]$Table,
-        [Parameter()]$Run
+        [Parameter(Mandatory)][ValidateNotNull()]$Table,
+        [Parameter()][string]$Product = ''
     )
-
-    if (-not $Table) { $Table = Get-ExchBuildTable -Run $Run }
 
     $parsed = $null
     try { $parsed = [version]$Build } catch { $parsed = $null }
