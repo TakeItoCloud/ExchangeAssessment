@@ -31,7 +31,7 @@ function New-ExchAssessmentJson {
         bySeverity    = (Get-ExchGroupCount -Items $findingList -Selector { param($f) $f.severity })
         byArea        = (Get-ExchGroupCount -Items $findingList -Selector { param($f) $f.controlDomain })
         sections      = $sectionList.Count
-        inventoryRows = (($sectionList | Measure-Object -Property totalRows -Sum).Sum)
+        inventoryRows = (Get-ExchSum -InputObject $sectionList -Property 'totalRows')
     }
 
     if ($Collection) {

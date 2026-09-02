@@ -4,8 +4,11 @@ EX.CH-01 - Exchange product version and build currency.
 Two separate questions, answered separately:
   1. Is the product version still supported? Exchange 2016 and 2019 reached end of support on
      14 October 2025; only Exchange Server SE is supported.
-  2. Is the build current? Answered from the build table, which knows when it was last
-     refreshed. A build newer than the table is reported as unverifiable, never as current.
+  2. Is the build current? Answered from Config/BuildTable.psd1, which carries the date it was
+     last refreshed. A build newer than the table is reported as unverifiable, never as current,
+     and once the table itself is older than Exchange.MaxBuildTableAgeDays the finding says so -
+     currency judged against a stale reference is a weaker statement, and the report should not
+     hide that.
 #>
 
 Set-StrictMode -Version Latest
@@ -37,6 +40,20 @@ function Invoke-ExchCollector_EX_CH_01_ExchangeVersionCU {
 
     $maxAgeDays = [int](Get-ExchThreshold -Run $Run -Name 'Exchange.MaxBuildAgeDays' -Default 180)
     $flagMixed  = [bool](Get-ExchThreshold -Run $Run -Name 'Exchange.FlagMixedVersions' -Default $true)
+    $maxTableAgeDays = [int](Get-ExchThreshold -Run $Run -Name 'Exchange.MaxBuildTableAgeDays' -Default 60)
+
+    # Loaded once. A missing or unparseable table throws rather than degrading to "nothing is
+    # known", which would look like a clean run.
+    try { $table = Get-ExchBuildTable -Run $Run }
+    catch {
+        $reason = "The Exchange build table could not be loaded, so build currency could not be assessed: $($_.Exception.Message)"
+        $null = Write-ExchError -Run $Run -Context 'Get-ExchBuildTable' -ErrorRecord $_ -ControlId $control.controlId
+        return New-ExchCollectorResult -Findings @(
+            New-ExchUnavailableFinding -Control $control -Reason $reason -DataSource 'BuildTable' `
+                -Remediation 'Restore src/ExchangeAssessment/Config/BuildTable.psd1, or pass a valid copy with -BuildTablePath.'
+        )
+    }
+    $tableAgeDays = [int][math]::Round(((Get-Date) - $table.TableAsOf).TotalDays, 0)
 
     $records = New-Object System.Collections.Generic.List[object]
     foreach ($srv in $servers) {
@@ -47,7 +64,7 @@ function Invoke-ExchCollector_EX_CH_01_ExchangeVersionCU {
 
         $family = Resolve-ExchProductFamily -Run $Run -Major $major -Minor $minor -Build $build
         $buildString = ('{0}.{1}.{2}.{3}' -f $major, $minor, $build, $revision)
-        $known = Resolve-ExchBuild -Build $buildString -Product $family.Name
+        $known = Resolve-ExchBuild -Build $buildString -Product $family.Name -Table $table
 
         $ageDays = $null
         if ($known.Known -and $known.Released) { $ageDays = [math]::Round(((Get-Date) - $known.Released).TotalDays, 0) }
@@ -68,12 +85,13 @@ function Invoke-ExchCollector_EX_CH_01_ExchangeVersionCU {
     }
 
     $recArr = @($records.ToArray())
-    $table = Get-ExchBuildTable
 
     $evidence = Write-ExchEvidenceFile -Run $Run -RelativePath 'exchange/builds.json' -ContentObject ([ordered]@{
-        servers        = $recArr
-        buildTableAsOf = $table.TableAsOf
+        servers          = $recArr
+        buildTableAsOf   = $table.TableAsOf
         buildTableSource = $table.Source
+        buildTablePath   = $table.Path
+        buildTableRows   = @($table.Builds).Count
     })
 
     $sections = @(
@@ -116,6 +134,13 @@ function Invoke-ExchCollector_EX_CH_01_ExchangeVersionCU {
         $outcomes.Add('Unknown') | Out-Null
     }
 
+    $tableStale = ($maxTableAgeDays -gt 0 -and $tableAgeDays -gt $maxTableAgeDays)
+    if ($tableStale) {
+        $problems.Add(("Build currency is being judged against a build table last refreshed on {0}, {1} days ago, which is beyond the {2}-day limit - a build reported as current may since have been superseded by a security update" -f `
+            $table.TableAsOf.ToString('yyyy-MM-dd'), $tableAgeDays, $maxTableAgeDays)) | Out-Null
+        $outcomes.Add('PartiallyCompliant') | Out-Null
+    }
+
     if ($problems.Count -eq 0) { $outcomes.Add('Compliant') | Out-Null }
 
     $outcome = Get-ExchWorstOutcome -Outcomes $outcomes.ToArray()
@@ -141,6 +166,7 @@ function Invoke-ExchCollector_EX_CH_01_ExchangeVersionCU {
             staleBuildCount  = $stale.Count
             unverifiedCount  = $unverified.Count
             buildTableAsOf   = $table.TableAsOf.ToString('yyyy-MM-dd')
+            buildTableAgeDays = $tableAgeDays
         } `
         -Meta @{ dataSources = @{ Exchange = @{ state = 'Success'; reason = '' } }; evaluationStatus = 'Complete' }
 

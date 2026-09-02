@@ -100,7 +100,7 @@ function Get-ExchControlCatalog {
             controlId  = 'TR.CO-01'
             domain     = 'Transport'
             title      = 'Transport connector posture'
-            target     = 'Send and receive connectors are scoped, authenticated and size-limited, internet send connectors require TLS, and no receive connector relays anonymously from any address.'
+            target     = 'Send and receive connectors are scoped, authenticated and size-limited, internet send connectors require TLS, and no receive connector grants ms-Exch-SMTP-Accept-Any-Recipient to an anonymous or externally secured principal from an unrestricted address range.'
             mappings   = @(
                 @{ framework='ISO27001:2022'; ref='A.5.7'; note='Threat protection (mail flow)' }
                 @{ framework='CISv8'; ref='9.2'; note='Email protections' }
