@@ -20,7 +20,10 @@ function Invoke-ExchCollection {
         # scales with the size of the organisation.
         [Parameter()][switch]$SkipMailboxInventory,
         # DNS lookups leave the network. Some assessments are run where that is not allowed.
-        [Parameter()][switch]$SkipDnsQueries
+        [Parameter()][switch]$SkipDnsQueries,
+        # The greenfield deployment checks contact the servers named in the deployment config,
+        # which are not Exchange servers yet. Skip them where that contact is not wanted.
+        [Parameter()][switch]$SkipDeploymentChecks
     )
 
     Set-StrictMode -Version Latest
@@ -38,6 +41,7 @@ function Invoke-ExchCollection {
         SkipDomainQueries    = [bool]$SkipDomainQueries.IsPresent
         SkipMailboxInventory = [bool]$SkipMailboxInventory.IsPresent
         SkipDnsQueries       = [bool]$SkipDnsQueries.IsPresent
+        SkipDeploymentChecks = [bool]$SkipDeploymentChecks.IsPresent
     }
     $includeCloud = Get-ExchRunFlag -Run $Run -Name 'IncludeExchangeOnline'
 

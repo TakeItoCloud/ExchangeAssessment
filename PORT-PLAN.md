@@ -26,8 +26,16 @@ evaluate" from "passed", and the analyzer suspensions below are gone.
 | P11 | Exchange Online collection for the tenant side of a hybrid organisation | Done | 2026-09-01 |
 | P12 | Correctness fixes verified against Microsoft Learn: relay permission check, refreshed and externalised build table, 2016/2013 AD preparation levels, functional-level and OS supportability corrections, per-server queue scope | Done | 2026-09-02 |
 | P13 | Deployment config contract: shipped template, `New-ExchDeploymentConfig`, and a preflight warning naming what a greenfield deployment has not supplied (see *P13*) | Done | 2026-09-11 |
-| P14 | Greenfield deployment (`DEP.*`) collectors that read the P13 `Deployment` section | Planned | |
+| P14 | Greenfield deployment (`DEP.*`) collectors that read the P13 `Deployment` section (see *P14*) | In progress | 2026-09-11 |
+| P14.1 | `DEP.TGT-01` target server prerequisite readiness, `Config/PrereqTable.psd1` and `-PrereqTablePath` | In progress - green over mocks; first real run is P14.7 | 2026-09-11 |
+| P14.2 | `DEP.NET-01` port reachability probed from each target server outward | Planned | |
+| P14.3 | `DEP.WIT-01` file share witness prerequisites | Planned | |
+| P14.4 | `DEP.NAME-01` name and DNS availability for the planned names | Planned | |
+| P14.5 | `DEP.VOL-01` database and log volume checks on the target servers (`DatabaseVolume`, `LogVolume`) | Planned | |
+| P14.6 | `DEP-01` greenfield roll-up, declaring `DEP.TGT-01` and the other `DEP.*` controls in `Requires` | Planned | |
+| P14.7 | First run of `DEP.TGT-01` against real target servers - owner: Carlos Annes (operator) | Planned | |
 | P15 | Generate the P13 deployment config from an approval table | Planned | |
+| P16 | Test debt reported by P13: the comment-based help guard names one function, so it cannot catch the next export added without help, and the twelve older exports have none; and nothing runs the suite under Windows PowerShell 5.1 (see *P16*) | Planned | |
 
 ## The 5.1 constraint
 
@@ -229,13 +237,58 @@ never fails - when the section is missing, with the template's resolved path and
 and names exactly the keys a partly filled config leaves empty. `Invoke-ExchAssess.ps1` prints
 that warning as a delimited block.
 
-No collector reads the section yet. P14 owns every `DEP.*` control and any change to
+When P13 closed no collector read the section. P14 owns every `DEP.*` control and any change to
 `CollectorRegistry.ps1`; P15 owns generating the config from an approval table.
 
 Verified on the dev VM only, under PowerShell 7.6 and Windows PowerShell 5.1, with synthetic
 `.test` host names, plus one end-to-end `Invoke-ExchAssess.ps1` run on that VM with no Exchange
 present, which completed and printed the block. No Exchange organisation, domain controller or
 client host was involved, because the phase reads none.
+
+### P14 — Greenfield deployment collectors
+
+**P14.1 `DEP.TGT-01` — In progress 2026-09-11.** Every other collector that inspects servers
+takes its list from `Get-ExchangeServer`, so it cannot see a server that is not an Exchange server
+yet. `DEP.TGT-01` reads `Deployment.TargetServers` and nothing else - no `Get-ExchangeServer`, no
+guess from the directory - and checks each named server against the Exchange Server SE
+prerequisites in `Config/PrereqTable.psd1`: seventeen keys, one check each. Every value was read
+on Microsoft Learn on 2026-09-11 and carries its URL and date. Five are `$null` because Learn does
+not state them, and those checks report `Unknown`; the README lists them.
+
+Each name is resolved before anything is sent to it. A name that resolves is read over CIM and
+over WinRM, which fail independently, class by class and item by item; the per-server record says
+which mechanisms answered, and each check names the mechanisms it needs. A supplied target that is
+a domain controller, already an Exchange server, not a domain member or in another forest is a
+finding, not a failure.
+
+Built and green on the dev VM against mocks only. That says the mocks behave as described, and
+nothing about a real server; the phase stays In progress until P14.7.
+
+**P14.7 — first real run. Owner: Carlos Annes (operator).** Against at least one real,
+sanitised target server, from a host that can reach it: run `Invoke-ExchAssess.ps1` with a filled
+deployment config, and confirm that the name resolves, that CIM and WinRM each answer or fail with
+their own error, that every one of the seventeen checks has a row with an outcome or an `Unknown`
+naming its cause, that the uninstall-key reading finds the Visual C++ 2012 and UCMA entries by the
+names in the table, that `Get-WindowsFeature` returns `InstallState` over WinRM, and that the
+volume holding `%ProgramFiles%` is matched. Record what differs from the mocks.
+
+**P14.2 to P14.6** are the remaining `DEP.*` controls. `DEP.NET-01` is next: probing ports from the
+target outward is a different execution model and does not belong in `DEP.TGT-01`. `DEP.VOL-01`
+is added so that the checks the template promises for `DatabaseVolume` and `LogVolume` are owned
+rather than implied.
+
+### P16 — Test debt reported by P13
+
+Two gaps P13 reported and did not close:
+
+- The comment-based help test checks a named list holding one function, `New-ExchDeploymentConfig`.
+  The next export added without help will not be caught, and the twelve exports that predate P13
+  carry a file header instead of help. Make the guard cover every name in `FunctionsToExport`,
+  and backfill the twelve so it can.
+- The dev VM's Windows PowerShell 5.1 has only Pester 3.4.0, so the suite never runs under the
+  edition the module actually ships for. P13 and P14.1 exercised new code under 5.1 by direct
+  execution only. Automate a 5.1 regression - a Pester 5 install for Windows PowerShell, or a
+  `windows-latest` CI leg under `powershell`.
 
 ### Cosmetic backlog
 

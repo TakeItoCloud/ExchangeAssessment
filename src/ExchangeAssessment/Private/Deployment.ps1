@@ -6,9 +6,10 @@ member servers that will become Exchange servers, the file share witness, and th
 They arrive as a Deployment section in the file passed with -ConfigPath, shaped like
 Config/Deployment.template.psd1, and ride on the run's merged configuration.
 
-No collector reads the section yet. What lives here is the contract itself - its keys, where the
-template is, and what a given configuration is missing - so the preflight check can say, by
-name, what the operator has not supplied.
+What lives here is the contract itself - its keys, where the template is, what a given
+configuration is missing, and the instructions for supplying it - so the preflight check and the
+DEP.* collectors say, by name and in the same words, what the operator has not supplied.
+DEP.TGT-01 reads TargetServers.
 #>
 
 Set-StrictMode -Version Latest
@@ -66,6 +67,28 @@ function Get-ExchDeploymentConfigGap {
     }
 }
 
+function Get-ExchDeploymentConfigInstruction {
+    <#
+    Where the template is and the commands that supply a deployment config. The preflight warning
+    and every DEP.* collector that reports a missing value take their wording from here, so the
+    two can never tell the operator different things.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $template = Get-ExchDeploymentTemplatePath
+    if (-not (Test-Path -LiteralPath $template -PathType Leaf)) {
+        $template = "$template (not found - the module installation is incomplete)"
+    }
+
+    [pscustomobject]@{
+        Template       = $template
+        CreateCommand  = 'New-ExchDeploymentConfig -Path .\Deployment.psd1'
+        PassBackRun    = 'New-ExchRun -OutputRoot <folder> -ConfigPath .\Deployment.psd1'
+        PassBackScript = '.\scripts\Invoke-ExchAssess.ps1 -TenantHint <name> -ConfigPath .\Deployment.psd1'
+    }
+}
+
 function Get-ExchDeploymentConfigWarning {
     <#
     The preflight warning for a Deployment section, or $null when every contract key is filled.
@@ -81,19 +104,17 @@ function Get-ExchDeploymentConfigWarning {
     $gap = Get-ExchDeploymentConfigGap -Deployment $Deployment
     if (@($gap.Missing).Count -eq 0) { return $null }
 
-    $template = Get-ExchDeploymentTemplatePath
-    if (-not (Test-Path -LiteralPath $template -PathType Leaf)) {
-        $template = "$template (not found - the module installation is incomplete)"
-    }
+    $instruction = Get-ExchDeploymentConfigInstruction
+    $template = $instruction.Template
 
     if (-not $gap.Supplied) {
         $lines = @(
             'Deployment config: none supplied. Greenfield deployment controls will report Unknown because no target servers, witness or planned names were supplied.'
             'This is expected when assessing an existing organisation, and the rest of the assessment is unaffected.'
             "  Template:      $template"
-            '  Create a copy: New-ExchDeploymentConfig -Path .\Deployment.psd1'
-            '  Pass it back:  New-ExchRun -OutputRoot <folder> -ConfigPath .\Deployment.psd1'
-            '             or: .\scripts\Invoke-ExchAssess.ps1 -TenantHint <name> -ConfigPath .\Deployment.psd1'
+            "  Create a copy: $($instruction.CreateCommand)"
+            "  Pass it back:  $($instruction.PassBackRun)"
+            "             or: $($instruction.PassBackScript)"
             '  A run takes one -ConfigPath: if it already carries threshold overrides, add the Deployment section to that file.'
         )
     }

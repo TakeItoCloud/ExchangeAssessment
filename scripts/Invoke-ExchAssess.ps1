@@ -49,6 +49,12 @@ param(
     # A .psd1 replacing Config/BuildTable.psd1, for a run against a newer copy of Microsoft's
     # Exchange build list than the one shipped with the module.
     [Parameter()][string]$BuildTablePath,
+    # A .psd1 replacing Config/PrereqTable.psd1, for a run against a newer or operator-verified
+    # reading of the Exchange Server SE prerequisites than the one shipped with the module.
+    [Parameter()][string]$PrereqTablePath,
+    # Skip the greenfield deployment checks, which contact the servers named in the deployment
+    # config.
+    [Parameter()][switch]$SkipDeploymentChecks,
     # Put every inventory row in assessment.json instead of summarising the large sections.
     [Parameter()][switch]$FullInventory,
     [Parameter()][switch]$IncludeExchangeOnline,
@@ -73,7 +79,7 @@ try {
     Import-Module $modulePath -Force -ErrorAction Stop
 
     $run = New-ExchRun -OutputRoot $OutputRoot -TenantHint $TenantHint -ConfigPath $ConfigPath `
-        -BuildTablePath $BuildTablePath `
+        -BuildTablePath $BuildTablePath -PrereqTablePath $PrereqTablePath `
         -FullInventory:$FullInventory -IncludeExchangeOnline:$IncludeExchangeOnline `
         -CloudUserPrincipalName $CloudUserPrincipalName -CloudAppId $CloudAppId `
         -CloudCertificateThumbprint $CloudCertificateThumbprint -CloudOrganization $CloudOrganization `
@@ -111,12 +117,14 @@ try {
         skipDomain    = [bool]$SkipDomainQueries.IsPresent
         skipMailboxes = [bool]$SkipMailboxInventory.IsPresent
         skipDns       = [bool]$SkipDnsQueries.IsPresent
+        skipDeployment = [bool]$SkipDeploymentChecks.IsPresent
         fullInventory = [bool]$FullInventory.IsPresent
         includeCloud  = [bool]$IncludeExchangeOnline.IsPresent
     }
 
     $collection = Invoke-ExchCollection -Run $run -SkipDomainQueries:$SkipDomainQueries `
-        -SkipMailboxInventory:$SkipMailboxInventory -SkipDnsQueries:$SkipDnsQueries
+        -SkipMailboxInventory:$SkipMailboxInventory -SkipDnsQueries:$SkipDnsQueries `
+        -SkipDeploymentChecks:$SkipDeploymentChecks
 
     # Reports first, so the hash manifest covers them.
     $findingsPath = Save-ExchFindings -Run $run -Findings @($collection.Findings)

@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-09-11 (phase P14.1, `DEP.TGT-01`)
+
+The first greenfield deployment control: prerequisite readiness of the member servers that will
+become Exchange servers. Every collector that inspects servers so far takes its list from
+`Get-ExchangeServer`, so none of them can see a server that is not an Exchange server yet.
+`DEP.TGT-01` reads the servers from `Deployment.TargetServers` - the P13 contract passed with
+`-ConfigPath` - and from nowhere else.
+
+- **`Collectors/DEP.TGT-01.TargetServerReadiness.ps1`**, registered as `DEP.TGT-01`, area
+  `Deployment`, no `Requires`, `Cloud = $false`, skip flag `SkipDeploymentChecks`. Each name is
+  resolved first; a name that does not resolve is reported by name and nothing is sent to it, so a
+  typo reads as a typo and not as a server that is down. A resolving name is read over CIM
+  (operating system and edition, volumes with free space and allocation unit, page file, installed
+  memory, services, domain membership and forest, last boot) and over WinRM (the .NET Framework
+  Release value, both uninstall roots, Windows features, `%ProgramFiles%`, the pending-restart
+  indicators). The two degrade independently, class by class and item by item: a check whose
+  mechanism failed is `Unknown` naming the mechanism and the error, and the per-server record says
+  which mechanisms answered. Installed software comes from the uninstall keys, never `Win32_Product`.
+  A target that is a domain controller, already runs Exchange services, is not a domain member or
+  is in another forest is a finding, not a failure. The control is `Compliant` only when every
+  check on every server is.
+- **`Config/PrereqTable.psd1`** - seventeen Exchange Server SE prerequisites, each with the Microsoft
+  Learn URL it was read from and the date (2026-09-11). Five keys Learn does not state are `$null`
+  and report `Unknown` - the uninstall names of the Visual C++ 2013 package and the IIS URL Rewrite
+  Module, and the minimum Visual C++ 2012, Visual C++ 2013 and UCMA versions - and inside the .NET
+  key the Windows Server 2019 row is `$null`, because the supportability matrix's .NET table has no
+  Exchange Server SE row for it. **With the shipped table `DEP.TGT-01` cannot report `Compliant`.** That is the honest answer
+  until an operator supplies verified values.
+- **`-PrereqTablePath`** on `New-ExchRun` and `Invoke-ExchAssess.ps1`, and `Catalog/PrereqTable.ps1`,
+  mirroring `-BuildTablePath` and `Catalog/BuildTable.ps1`: the same path resolution, the same
+  loading, the same validation, and a missing or unparseable table is an error.
+- **`-SkipDeploymentChecks`** on `Invoke-ExchCollection` and `Invoke-ExchAssess.ps1`.
+- `Private/Deployment.ps1` gains `Get-ExchDeploymentConfigInstruction`, and the preflight warning now
+  takes its template path and commands from it, so `DEP.TGT-01`'s "none supplied" rationale and the
+  warning cannot drift apart. The warning text is unchanged byte for byte (SHA256 compared before and
+  after).
+
+**Changed.** `ModuleVersion` is **0.3.0**: the set of controls changed, which the PORT-PLAN rule
+treats as a changed finding. With no deployment config every run now carries one more finding -
+`DEP.TGT-01`, `Unknown`, severity Info - which says none was supplied.
+
+**Tests** — twelve added (68 to 80). The registry row is well formed and its function resolves; no
+target servers gives exactly one `Unknown` finding carrying the template path and both P13
+commands, and contacts nothing; with only CIM answering, the 5 CIM-only checks are judged and the 12
+that need WinRM are `Unknown` naming it, and the reverse for 8 and 9; a throwing mock becomes a
+named `Unknown`, never a missing finding or a pass; a name that does not resolve is told apart from
+one that resolves and does not answer, and is never contacted; all 17 keys, counted from the file's
+text, map one to one onto checks; every value carries a Learn URL and read date; an AST scan finds
+no `Win32_Product` and does find the seven CIM classes and both uninstall roots; a value nulled
+through a `-PrereqTablePath` copy turns a passing check `Unknown`; a domain controller, an Exchange
+server and a foreign forest are findings; and the table loads and refuses a missing path like the
+build table.
+
+**Not verified against a real server.** Every test runs against mocks. P14.7 is the first real
+run, owned by the operator.
+
 ### Added — 2026-09-11 (phase P13)
 
 The deployment config contract, and a warning that makes it hard to miss. The assessment

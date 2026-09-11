@@ -1029,6 +1029,393 @@ Describe 'ExchangeAssessment' {
         }
     }
 
+    Context 'Target server readiness (DEP.TGT-01)' {
+
+        BeforeAll {
+            Import-Module -Name $script:ManifestPath -Force -ErrorAction Stop
+
+            $script:PrereqTableFile = Join-Path -Path $script:ToolRoot -ChildPath 'Config/PrereqTable.psd1'
+            $script:DepCollectorFile = Join-Path -Path $script:CollectorRoot -ChildPath 'DEP.TGT-01.TargetServerReadiness.ps1'
+
+            # How many prerequisite keys the table declares, written here rather than read from the
+            # module, so a key dropped from the file or from the checks turns this context red.
+            $script:DeclaredPrereqCount = 17
+
+            $script:PrereqData = Import-PowerShellDataFile -Path $script:PrereqTableFile
+            $script:PrereqDefinitions = @{}
+            foreach ($definition in @(& (Get-Module $script:ModuleName) { Get-ExchPrereqCheckDefinition })) {
+                $script:PrereqDefinitions[$definition.Key] = $definition
+            }
+
+            # A synthetic run. Every host name sits under the reserved .test top-level domain
+            # (RFC 2606) and every address in TEST-NET-1 (RFC 5737): nothing here is a real host.
+            function New-TestDepRun {
+                param([object[]]$Targets = @(), [string]$PrereqTablePath = '', [switch]$NoDeployment)
+                $folder = Join-Path -Path $TestDrive -ChildPath ('run-' + [guid]::NewGuid())
+                New-Item -ItemType Directory -Path (Join-Path -Path $folder -ChildPath 'evidence') -Force | Out-Null
+                $config = if ($NoDeployment) { @{} } else { @{ Deployment = @{ TargetServers = $Targets } } }
+                [pscustomobject]@{
+                    RunId = 'test'; TenantHint = 'test'; RunFolder = $folder
+                    LogPath = (Join-Path -Path $folder -ChildPath 'run.jsonl'); ConfigPath = ''
+                    Config = $config; Flags = @{}; PrereqTablePath = $PrereqTablePath
+                    Errors = (New-Object System.Collections.Generic.List[object])
+                }
+            }
+
+            # What a server that meets every documented prerequisite returns: Windows Server build
+            # 20348, Standard Server Core, 128 GB installed with a fixed 32768 MB page file, 100 GB
+            # free on C:, Remote Registry automatic.
+            function Get-TestCimInstance {
+                param([string]$ClassName)
+                if ($script:DepScenario.Cim -and $script:DepScenario.Cim.ContainsKey($ClassName)) { return $script:DepScenario.Cim[$ClassName] }
+                switch ($ClassName) {
+                    'Win32_OperatingSystem' { [pscustomobject]@{ Caption = 'Test Server OS'; Version = '10.0.20348'; OperatingSystemSKU = 13; SystemDrive = 'C:'; LastBootUpTime = [datetime]'2026-09-01' } }
+                    'Win32_ComputerSystem'  { [pscustomobject]@{ PartOfDomain = $true; Domain = 'corp.example.test'; DomainRole = 3; AutomaticManagedPagefile = $false } }
+                    'Win32_NTDomain'        { [pscustomobject]@{ DomainName = 'CORP'; DNSForestName = 'example.test' } }
+                    'Win32_Volume'          { [pscustomobject]@{ Name = 'C:\'; DriveLetter = 'C:'; FileSystem = 'NTFS'; Capacity = 200GB; FreeSpace = 100GB; BlockSize = 4096 } }
+                    'Win32_PageFileSetting' { [pscustomobject]@{ Name = 'C:\pagefile.sys'; InitialSize = 32768; MaximumSize = 32768 } }
+                    'Win32_PhysicalMemory'  { [pscustomobject]@{ Capacity = 64GB }; [pscustomobject]@{ Capacity = 64GB } }
+                    'Win32_Service'         { [pscustomobject]@{ Name = 'RemoteRegistry'; StartMode = 'Auto'; State = 'Running' } }
+                    default                 { throw "Unexpected CIM class in test: $ClassName" }
+                }
+            }
+
+            # What the WinRM reading of the same server returns. The display names are the ones the
+            # table documents; the versions are placeholders, not real build numbers.
+            function New-TestRemoteReading {
+                $features = @($script:PrereqData.Prerequisites.WindowsFeatures.Value.DesktopExperience)
+                $indicators = @($script:PrereqData.Prerequisites.PendingReboot.Value)
+                [pscustomobject]@{
+                    DotNetRelease     = 528449
+                    DotNetFullKey     = $true
+                    Uninstall         = @(
+                        [pscustomobject]@{ Root = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'; DisplayName = 'Microsoft Visual C++ 2012 Redistributable (x64) - 0.0.1'; DisplayVersion = '0.0.1' }
+                        [pscustomobject]@{ Root = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'; DisplayName = 'Microsoft Unified Communications Managed API 4.0, Runtime'; DisplayVersion = '0.0.1' }
+                    )
+                    UnreadableEntries = 0
+                    Features          = @($features | ForEach-Object { [pscustomobject]@{ Name = $_; InstallState = 'Installed' } })
+                    ProgramFiles      = 'C:\Program Files'
+                    Reboot            = @($indicators | ForEach-Object { [pscustomobject]@{ Path = $_.Path; ValueName = $_.ValueName; Present = $false } })
+                    Errors            = @{}
+                }
+            }
+
+            function Invoke-TestDep {
+                param($Run)
+                & (Get-Module $script:ModuleName) { param($r) Invoke-ExchCollector_DEP_TGT_01_TargetServerReadiness -Run $r } $Run
+            }
+
+            $script:DepScenario = @{}
+
+            # Every remote call is mocked. The collector reaches targets only through these three
+            # helpers, and the assessment host's forest through the fourth.
+            Mock -ModuleName $script:ModuleName Resolve-ExchTargetName {
+                if ($script:DepScenario.ResolveThrows) { throw 'resolver failed (test)' }
+                if (@($script:DepScenario.Unresolvable) -contains $Name) { return [pscustomobject]@{ Resolved = $false; Addresses = @(); Error = 'No such host is known (test)' } }
+                [pscustomobject]@{ Resolved = $true; Addresses = @('192.0.2.10'); Error = '' }
+            }
+            Mock -ModuleName $script:ModuleName Get-ExchTargetCimInstance {
+                if ($script:DepScenario.CimFails -or @($script:DepScenario.CimDown) -contains $ComputerName) { throw "CIM connection to $ComputerName refused (test)" }
+                if ($script:DepScenario.FailingCimClass -eq $ClassName) { throw "$ClassName query failed (test)" }
+                Get-TestCimInstance -ClassName $ClassName
+            }
+            Mock -ModuleName $script:ModuleName Invoke-ExchTargetCommand {
+                if ($script:DepScenario.WinRmFails -or @($script:DepScenario.WinRmDown) -contains $ComputerName) { throw "WinRM connection to $ComputerName refused (test)" }
+                New-TestRemoteReading
+            }
+            Mock -ModuleName $script:ModuleName Get-ExchRunForestName { 'example.test' }
+        }
+
+        BeforeEach { $script:DepScenario = @{} }
+
+        It 'registers DEP.TGT-01 as a well-formed row whose function resolves to a real function' {
+            $registry = & (Get-Module $script:ModuleName) { Get-ExchCollectorRegistry }
+            $rows = @($registry | Where-Object { $_.Id -eq 'DEP.TGT-01' })
+            $rows.Count | Should -Be 1
+
+            $row = $rows[0]
+            $row.Function | Should -Be 'Invoke-ExchCollector_DEP_TGT_01_TargetServerReadiness'
+            $row.Area | Should -Be 'Deployment'
+            @($row.Requires).Count | Should -Be 0
+            $row.Cloud | Should -BeFalse
+            $row.SkipFlag | Should -Be 'SkipDeploymentChecks'
+
+            $command = & (Get-Module $script:ModuleName) { param($n) Get-Command -Name $n -CommandType Function -ErrorAction SilentlyContinue } $row.Function
+            $command | Should -Not -BeNullOrEmpty -Because 'the registry row must name a function the module defines'
+            $command.Parameters.Keys | Should -Contain 'Run'
+
+            # The skip flag is honoured only when Invoke-ExchCollection has a switch of that name.
+            (Get-Command -Name 'Invoke-ExchCollection' -Module $script:ModuleName).Parameters.Keys | Should -Contain $row.SkipFlag
+            { & (Get-Module $script:ModuleName) { Get-ExchControlById -ControlId 'DEP.TGT-01' } } | Should -Not -Throw
+        }
+
+        It 'reports exactly one Unknown finding carrying the three P13 strings when no target server was supplied' {
+            $template = & (Get-Module $script:ModuleName) { Get-ExchDeploymentTemplatePath }
+
+            foreach ($run in @((New-TestDepRun -NoDeployment), (New-TestDepRun -Targets @()), (New-TestDepRun -Targets @('', '   ')))) {
+                $result = Invoke-TestDep -Run $run
+                @($result.findings).Count | Should -Be 1
+                @($result.sections).Count | Should -Be 0
+
+                $finding = $result.findings[0]
+                $finding.controlId | Should -Be 'DEP.TGT-01'
+                $finding.result.outcome | Should -Be 'Unknown'
+                $rationale = $finding.result.rationale
+                $rationale | Should -Not -BeNullOrEmpty
+                $rationale.Contains($template) | Should -BeTrue -Because "the rationale must carry the template path $template"
+                $rationale.Contains('New-ExchDeploymentConfig -Path .\Deployment.psd1') | Should -BeTrue
+                $rationale.Contains('-ConfigPath .\Deployment.psd1') | Should -BeTrue
+                $rationale | Should -Match 'does not mean there are no target servers'
+            }
+
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Resolve-ExchTargetName -Times 0 -Exactly
+        }
+
+        It 'judges the 5 CIM-only checks and reports the 12 checks that need WinRM as Unknown when only CIM answers' {
+            $script:DepScenario = @{ WinRmFails = $true }
+            $result = Invoke-TestDep -Run (New-TestDepRun -Targets @('mbx01.example.test'))
+            $metrics = $result.findings[0].result.metrics
+
+            $server = @($metrics.servers)[0]
+            $server.CimState | Should -Be 'Succeeded'
+            $server.WinRmState | Should -Be 'Failed'
+            $server.WinRmError | Should -Match 'WinRM connection to mbx01\.example\.test refused'
+            $server.Status | Should -Be 'PartiallyRead'
+
+            $rows = @($metrics.checks)
+            $rows.Count | Should -Be $script:DeclaredPrereqCount
+            $cimOnly = @($rows | Where-Object { @($script:PrereqDefinitions[$_.Check].Mechanisms) -notcontains 'WinRM' })
+            $needWinRm = @($rows | Where-Object { @($script:PrereqDefinitions[$_.Check].Mechanisms) -contains 'WinRM' })
+            $cimOnly.Count | Should -Be 5
+            $needWinRm.Count | Should -Be 12
+
+            foreach ($row in $cimOnly) {
+                $row.Outcome | Should -Be 'Compliant' -Because "$($row.Check) reads only CIM, which answered"
+                $row.MechanismState | Should -Be 'CIM:Read'
+            }
+            foreach ($row in $needWinRm) {
+                $row.Outcome | Should -Be 'Unknown' -Because "$($row.Check) needs WinRM, which failed"
+                $row.Cause | Should -Match '^Not read: .*WinRM \(Invoke-Command\) to mbx01\.example\.test failed'
+                $row.MechanismState | Should -Match 'WinRM:Failed'
+            }
+            $result.findings[0].result.outcome | Should -Not -Be 'Compliant'
+        }
+
+        It 'judges the 8 WinRM-only checks and reports the 9 checks that need CIM as Unknown when only WinRM answers' {
+            $script:DepScenario = @{ CimFails = $true }
+            $result = Invoke-TestDep -Run (New-TestDepRun -Targets @('mbx01.example.test'))
+            $metrics = $result.findings[0].result.metrics
+
+            $server = @($metrics.servers)[0]
+            $server.CimState | Should -Be 'Failed'
+            $server.CimError | Should -Match 'Win32_OperatingSystem query failed: CIM connection to mbx01\.example\.test refused'
+            $server.WinRmState | Should -Be 'Succeeded'
+            $server.Status | Should -Be 'PartiallyRead'
+
+            $rows = @($metrics.checks)
+            $winRmOnly = @($rows | Where-Object { @($script:PrereqDefinitions[$_.Check].Mechanisms) -notcontains 'CIM' })
+            $needCim = @($rows | Where-Object { @($script:PrereqDefinitions[$_.Check].Mechanisms) -contains 'CIM' })
+            $winRmOnly.Count | Should -Be 8
+            $needCim.Count | Should -Be 9
+
+            foreach ($row in $needCim) {
+                $row.Outcome | Should -Be 'Unknown' -Because "$($row.Check) needs CIM, which failed"
+                $row.Cause | Should -Match '^Not read: .*CIM on mbx01\.example\.test'
+                $row.MechanismState | Should -Match 'CIM:Failed'
+            }
+            foreach ($row in $winRmOnly) {
+                $row.MechanismState | Should -Be 'WinRM:Read'
+                if ($row.Outcome -eq 'Unknown') {
+                    $row.Cause | Should -Match '^No Learn-documented value' -Because "$($row.Check) was read, so only a missing table value may leave it Unknown"
+                }
+            }
+            foreach ($check in @('VisualCppRedistributable2012', 'UcmaRuntime', 'PendingReboot')) {
+                @($rows | Where-Object { $_.Check -eq $check })[0].Outcome | Should -Be 'Compliant'
+            }
+        }
+
+        It 'turns a throwing mock into Unknown with a named cause, never a missing finding or a pass' {
+            $script:DepScenario = @{ FailingCimClass = 'Win32_PageFileSetting' }
+            $result = Invoke-TestDep -Run (New-TestDepRun -Targets @('mbx01.example.test'))
+            @($result.findings).Count | Should -Be 1
+            $result.findings[0].result.outcome | Should -Not -Be 'Compliant'
+
+            $pageFile = @($result.findings[0].result.metrics.checks | Where-Object { $_.Check -eq 'PageFileSize' })[0]
+            $pageFile.Outcome | Should -Be 'Unknown'
+            $pageFile.Cause | Should -Match 'Win32_PageFileSetting query failed: Win32_PageFileSetting query failed \(test\)'
+            @($result.findings[0].result.metrics.servers)[0].CimState | Should -Be 'Partial'
+
+            $script:DepScenario = @{ ResolveThrows = $true }
+            $thrown = Invoke-TestDep -Run (New-TestDepRun -Targets @('mbx02.example.test'))
+            @($thrown.findings).Count | Should -Be 1
+            $thrown.findings[0].result.outcome | Should -Be 'Unknown'
+            $server = @($thrown.findings[0].result.metrics.servers)[0]
+            $server.Status | Should -Be 'NameDoesNotResolve'
+            $server.ResolveError | Should -Match 'resolver failed \(test\)'
+
+            foreach ($row in @(@($result.findings[0].result.metrics.checks) + @($thrown.findings[0].result.metrics.checks))) {
+                if ($row.Outcome -eq 'Unknown') { [string]$row.Cause | Should -Not -BeNullOrEmpty -Because "$($row.Server) $($row.Check) is Unknown and must say why" }
+            }
+        }
+
+        It 'tells a name that does not resolve from one that resolves but does not answer' {
+            $script:DepScenario = @{ Unresolvable = @('typo01.example.test'); CimDown = @('down01.example.test'); WinRmDown = @('down01.example.test') }
+            $result = Invoke-TestDep -Run (New-TestDepRun -Targets @('typo01.example.test', 'down01.example.test'))
+            $finding = $result.findings[0]
+            $servers = @($finding.result.metrics.servers)
+
+            $typo = @($servers | Where-Object { $_.Server -eq 'typo01.example.test' })[0]
+            $typo.Status | Should -Be 'NameDoesNotResolve'
+            $typo.Resolves | Should -Be 'False'
+            $typo.CimState | Should -Be 'NotAttempted'
+            $typo.WinRmState | Should -Be 'NotAttempted'
+
+            $down = @($servers | Where-Object { $_.Server -eq 'down01.example.test' })[0]
+            $down.Status | Should -Be 'Unreachable'
+            $down.Resolves | Should -Be 'True'
+            $down.CimState | Should -Be 'Failed'
+            $down.WinRmState | Should -Be 'Failed'
+
+            @($finding.result.metrics.unresolvedNames) | Should -Be @('typo01.example.test')
+            @($finding.result.metrics.unreachableNames) | Should -Be @('down01.example.test')
+
+            $rationale = $finding.result.rationale
+            $rationale | Should -Match 'do not resolve, so nothing was sent to them.*typo01\.example\.test'
+            $unreachableSentence = ($rationale -split 'answered neither CIM nor WinRM')[1]
+            $unreachableSentence | Should -Match 'down01\.example\.test'
+            ($unreachableSentence -split 'do not resolve')[0] | Should -Not -Match 'typo01' -Because 'a name that does not resolve must not be reported as a server that is down'
+
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Get-ExchTargetCimInstance -Times 0 -Exactly -ParameterFilter { $ComputerName -eq 'typo01.example.test' }
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Invoke-ExchTargetCommand -Times 0 -Exactly -ParameterFilter { $ComputerName -eq 'typo01.example.test' }
+        }
+
+        It 'exercises all 17 prerequisite keys declared in PrereqTable.psd1, one check per key per server' {
+            # Counted from the file's text, not the parsed table, so the count cannot agree with
+            # itself by construction.
+            $text = Get-Content -LiteralPath $script:PrereqTableFile -Raw
+            $block = [regex]::Match($text, '(?ms)^[ ]{4}Prerequisites[ ]*=[ ]*@\{(?<body>.*)^[ ]{4}\}')
+            $block.Success | Should -BeTrue -Because 'the table must carry a Prerequisites = @{ ... } block'
+            $textKeys = @([regex]::Matches($block.Groups['body'].Value, '(?m)^[ ]{8}(?<key>[A-Za-z]\w*)[ ]*=') | ForEach-Object { $_.Groups['key'].Value })
+
+            $textKeys.Count | Should -Be $script:DeclaredPrereqCount
+            Compare-Object -ReferenceObject $textKeys -DifferenceObject @($script:PrereqData.Prerequisites.Keys) | Should -BeNullOrEmpty
+            Compare-Object -ReferenceObject $textKeys -DifferenceObject @($script:PrereqDefinitions.Keys) | Should -BeNullOrEmpty -Because 'every key needs a check, and every check a key'
+
+            $result = Invoke-TestDep -Run (New-TestDepRun -Targets @('mbx01.example.test', 'mbx02.example.test'))
+            $rows = @($result.findings[0].result.metrics.checks)
+            $rows.Count | Should -Be (2 * $script:DeclaredPrereqCount)
+            foreach ($server in @('mbx01.example.test', 'mbx02.example.test')) {
+                $checked = @($rows | Where-Object { $_.Server -eq $server } | ForEach-Object { $_.Check })
+                Compare-Object -ReferenceObject $textKeys -DifferenceObject $checked | Should -BeNullOrEmpty
+            }
+            @($rows | Where-Object { [string]$_.Cause -match 'No check is defined' }) | Should -BeNullOrEmpty
+
+            $section = @($result.sections | Where-Object { $_.key -eq 'deployment.target-prerequisites' })[0]
+            $section.totalRows | Should -Be (2 * $script:DeclaredPrereqCount)
+        }
+
+        It 'records a Learn URL and a read date next to every prerequisite value' {
+            [datetime]::ParseExact([string]$script:PrereqData.TableAsOf, 'yyyy-MM-dd', [cultureinfo]::InvariantCulture) | Should -BeOfType [datetime]
+
+            foreach ($key in $script:PrereqData.Prerequisites.Keys) {
+                $entry = $script:PrereqData.Prerequisites[$key]
+                $entry.Contains('Value') | Should -BeTrue -Because "$key must state a Value, even if it is `$null"
+                $sources = @($entry['Source'] | Where-Object { $_ })
+                $sources.Count | Should -BeGreaterThan 0 -Because "$key must name its source"
+                foreach ($source in $sources) { $source | Should -Match '^https://learn\.microsoft\.com/' -Because "$key must be sourced from Microsoft Learn" }
+                { [datetime]::ParseExact([string]$entry['Read'], 'yyyy-MM-dd', [cultureinfo]::InvariantCulture) } | Should -Not -Throw -Because "$key must carry the date it was read"
+                if ($null -eq $entry['Value']) { [string]$entry['Note'] | Should -Not -BeNullOrEmpty -Because "$key is `$null and must say what Learn does not document" }
+            }
+        }
+
+        It 'never reads installed software through Win32_Product' {
+            $tokens = $null
+            $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:DepCollectorFile, [ref]$tokens, [ref]$errors)
+            $errors | Should -BeNullOrEmpty
+
+            # Prove the file was read and is the collector, not an empty parse.
+            $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-ExchCollector_DEP_TGT_01_TargetServerReadiness' }, $true) |
+                Should -Not -BeNullOrEmpty
+
+            $strings = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -or $n -is [System.Management.Automation.Language.ExpandableStringExpressionAst] }, $true) |
+                ForEach-Object { [string]$_.Value })
+            $classes = @($strings | Where-Object { $_ -like 'Win32_*' } | Sort-Object -Unique)
+            $classes.Count | Should -BeGreaterOrEqual 7 -Because 'the collector reads seven CIM classes, so the scan must see them'
+            @($strings | Where-Object { $_ -match 'Win32_Product' }) | Should -BeNullOrEmpty -Because 'Win32_Product triggers a Windows Installer consistency check'
+
+            $commands = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.Extent.Text })
+            @($commands | Where-Object { $_ -match 'Win32_Product' }) | Should -BeNullOrEmpty
+
+            # Installed software comes from both uninstall roots instead.
+            $strings | Should -Contain 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+            $strings | Should -Contain 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+        }
+
+        It 'reports a $null prerequisite value as Unknown where the same reading with a value passes' {
+            $shipped = Invoke-TestDep -Run (New-TestDepRun -Targets @('mbx01.example.test'))
+            @($shipped.findings[0].result.metrics.checks | Where-Object { $_.Check -eq 'SystemVolumeFreeSpaceMB' })[0].Outcome | Should -Be 'Compliant'
+
+            $copy = Join-Path -Path $TestDrive -ChildPath 'PrereqTable.null.psd1'
+            $text = Get-Content -LiteralPath $script:PrereqTableFile -Raw
+            $nulled = [regex]::Replace($text, '(?ms)(SystemVolumeFreeSpaceMB = @\{\s*Value\s*=\s*)200', '${1}$null')
+            $nulled | Should -Not -Be $text -Because 'the copy must actually null the value'
+            Set-Content -LiteralPath $copy -Value $nulled
+
+            $result = Invoke-TestDep -Run (New-TestDepRun -Targets @('mbx01.example.test') -PrereqTablePath $copy)
+            $row = @($result.findings[0].result.metrics.checks | Where-Object { $_.Check -eq 'SystemVolumeFreeSpaceMB' })[0]
+            $row.Outcome | Should -Be 'Unknown'
+            $row.Cause | Should -Match '^No Learn-documented value'
+            $row.Measured | Should -Match 'MB free' -Because 'what was found is still reported'
+            $result.findings[0].result.metrics.prereqTablePath | Should -Be $copy
+
+            # The table ships $null where Learn is silent, and those checks are Unknown too.
+            @($shipped.findings[0].result.metrics.checks | Where-Object { $_.Check -eq 'VisualCppRedistributable2013' })[0].Outcome | Should -Be 'Unknown'
+            $shipped.findings[0].result.outcome | Should -Not -Be 'Compliant'
+        }
+
+        It 'reports a domain controller, an existing Exchange server and a foreign forest as findings, not failures' {
+            $script:DepScenario = @{ Cim = @{
+                'Win32_ComputerSystem' = [pscustomobject]@{ PartOfDomain = $true; Domain = 'other.test'; DomainRole = 5; AutomaticManagedPagefile = $false }
+                'Win32_NTDomain'       = [pscustomobject]@{ DomainName = 'OTHER'; DNSForestName = 'other.test' }
+                'Win32_Service'        = @(
+                    [pscustomobject]@{ Name = 'RemoteRegistry'; StartMode = 'Auto'; State = 'Running' }
+                    [pscustomobject]@{ Name = 'MSExchangeServiceHost'; StartMode = 'Auto'; State = 'Running' }
+                )
+            } }
+
+            $result = $null
+            { $script:DepResult = Invoke-TestDep -Run (New-TestDepRun -Targets @('dc01.example.test')) } | Should -Not -Throw
+            $result = $script:DepResult
+
+            $server = @($result.findings[0].result.metrics.servers)[0]
+            $server.IsDomainController | Should -Be 'True'
+            $server.IsExchangeServer | Should -Be 'True'
+            $server.SameForest | Should -Be 'False'
+
+            $rationale = $result.findings[0].result.rationale
+            $rationale | Should -Match 'are domain controllers'
+            $rationale | Should -Match 'already run Exchange services'
+            $rationale | Should -Match 'different forest'
+            $result.findings[0].result.outcome | Should -Be 'NonCompliant'
+        }
+
+        It 'loads the prerequisite table the way the build table loads, and refuses a missing one' {
+            $missing = Join-Path -Path $TestDrive -ChildPath 'no-such-prereq-table.psd1'
+            { New-ExchRun -OutputRoot (Join-Path -Path $TestDrive -ChildPath 'out') -PrereqTablePath $missing } | Should -Throw -ExpectedMessage '*PrereqTablePath not found*'
+            { & (Get-Module $script:ModuleName) { param($p) Get-ExchPrereqTable -Path $p } $missing } | Should -Throw -ExpectedMessage '*not found*'
+
+            $override = & (Get-Module $script:ModuleName) { Get-ExchPrereqTablePath -Run ([pscustomobject]@{ PrereqTablePath = 'X:\override.psd1' }) }
+            $override | Should -Be 'X:\override.psd1'
+            $default = & (Get-Module $script:ModuleName) { Get-ExchPrereqTablePath -Run ([pscustomobject]@{ PrereqTablePath = '' }) }
+            [System.IO.Path]::GetFullPath($default) | Should -Be ([System.IO.Path]::GetFullPath($script:PrereqTableFile))
+
+            $table = & (Get-Module $script:ModuleName) { Get-ExchPrereqTable }
+            $table.TableAsOf | Should -BeOfType [datetime]
+            @($table.Prerequisites.Keys).Count | Should -Be $script:DeclaredPrereqCount
+        }
+    }
+
     Context 'Static analysis' {
 
         It 'reports no PSScriptAnalyzer findings for the repository' {

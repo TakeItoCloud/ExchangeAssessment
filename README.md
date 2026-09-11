@@ -6,11 +6,12 @@ ExchangeAssessment reads an on-premises or hybrid Exchange organisation and repo
 the **configuration** it found, and the **problems** in that configuration. It is read-only —
 every collector reads, and the only writes are into the local run folder.
 
-A run drives 32 collectors across the whole organisation - servers, Active Directory, Exchange
+A run drives 33 collectors across the whole organisation - servers, Active Directory, Exchange
 version and patch state, databases, DAG and replication, transport configuration, connectors and
 queues, certificates, TLS, anti-malware, RBAC, mailboxes, retention and audit, client access,
-public folders, address lists, hybrid, identity sync, DNS posture and event logs - plus, on
-request, the Exchange Online side of a hybrid organisation. It then writes:
+public folders, address lists, hybrid, identity sync, DNS posture and event logs, and the
+prerequisites of the member servers named for a greenfield deployment - plus, on request, the
+Exchange Online side of a hybrid organisation. It then writes:
 
 - **`csv/`** — one CSV per configuration area, plus `csv/findings.csv`. The complete record.
 - **`assessment.json`** — the whole assessment in one file: configuration inventory, findings
@@ -53,6 +54,7 @@ Extracted from `infra-scripting-suite/powershell/Assessments/ExchangeAssessment`
 | `TLS-01` | SCHANNEL protocol state, .NET strong cryptography, serialised data signing |
 | `PTCH-01` | Security update currency, Emergency Mitigation Service, Windows patch cycle |
 | `DNS-01` | MX, SPF and DMARC for every authoritative accepted domain |
+| `DEP.TGT-01` | Greenfield deployment: Exchange Server SE prerequisites on the member servers named in `Deployment.TargetServers` - see *Planning a new deployment* |
 
 Four more run only with `-IncludeExchangeOnline`:
 
@@ -107,6 +109,10 @@ Two controls need a little more, and say so in their output rather than failing:
   It is never reported as a pass.
 - **`TR.QUE-01`** reads queues on every transport server, not just the local one. A server it
   cannot reach is named in the finding and makes the control SoftFail.
+- **`DEP.TGT-01`** reads each server named in `Deployment.TargetServers` over CIM and over WinRM
+  (`Invoke-Command`), so the account needs rights to query both on those servers. A mechanism it
+  cannot use makes the checks that need it `Unknown`, naming the mechanism and the error; the
+  checks the other mechanism answered still stand.
 
 ## Install
 
@@ -150,6 +156,12 @@ Import-Module .\src\ExchangeAssessment\ExchangeAssessment.psd1 -Force
 
 # Judge build currency against a newer copy of Microsoft's build list than the one shipped
 .\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -BuildTablePath .\BuildTable.psd1
+
+# Judge greenfield target servers against a newer or operator-verified prerequisite table
+.\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -ConfigPath .\Deployment.psd1 -PrereqTablePath .\PrereqTable.psd1
+
+# Skip the greenfield deployment checks, which contact the servers named in the deployment config
+.\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -SkipDeploymentChecks
 ```
 
 The script returns a summary object carrying `FindingsCount`, `SectionCount`, `CollectorsRun`,
@@ -275,9 +287,32 @@ deployment controls will report `Unknown`, with the template's full path and the
 above. That is expected for an assessment of an existing organisation, and the run carries on.
 A config with some keys still empty gets a warning naming exactly those keys.
 
-No collector reads the deployment config yet: the greenfield deployment controls that will are
-[PORT-PLAN.md](PORT-PLAN.md) phase P14. A filled copy holds client host names, so keep it out
-of source control. `Deployment.psd1` is gitignored in this repository for that reason.
+`DEP.TGT-01` reads `TargetServers` and checks each named server against the Exchange Server SE
+prerequisites. It never calls `Get-ExchangeServer` and never picks a server from the directory:
+with `TargetServers` empty it reports one `Unknown` finding naming the template and both commands,
+because none was supplied - not because there are none. Each name is resolved first, so a typo
+is reported as a name that does not resolve rather than as a server that is down. The other
+greenfield controls - port reachability, witness, planned names, database and log volumes, and
+the roll-up - are [PORT-PLAN.md](PORT-PLAN.md) phase P14. A filled copy holds client host names,
+so keep it out of source control. `Deployment.psd1` is gitignored in this repository for that
+reason.
+
+### Keeping the prerequisite table current
+
+`DEP.TGT-01` judges against
+[`src/ExchangeAssessment/Config/PrereqTable.psd1`](src/ExchangeAssessment/Config/PrereqTable.psd1):
+supported operating system builds and editions, the minimum .NET Framework release value per
+operating system, the Visual C++ 2012 and 2013 and UCMA 4.0 packages and their versions, IIS URL
+Rewrite, the Windows feature lists, Remote Registry, free space on the install, system and queue
+volumes, the page file rule and the pending-restart indicators. Every value carries the Microsoft
+Learn page it was read from and the date.
+
+Where Learn does not state a value the table holds `$null` and says so, and that check reports
+`Unknown` - so with the shipped table the control never reports `Compliant`. As shipped, that is
+the Visual C++ 2013 and IIS URL Rewrite uninstall names, the minimum Visual C++ and UCMA versions,
+and the .NET Framework row for Exchange Server SE on Windows Server 2019. An operator who has
+verified a value can supply it: copy the file, fill it in, and pass it with `-PrereqTablePath`,
+which loads, validates and overrides exactly as `-BuildTablePath` does.
 
 ## Development
 

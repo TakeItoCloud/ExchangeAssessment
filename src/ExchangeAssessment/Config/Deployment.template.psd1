@@ -21,8 +21,8 @@ one -ConfigPath, so a client that also has threshold overrides keeps both in the
 A filled copy holds client host names. Never commit one to source control, and never fill in this
 template: it ships empty, and a test holds it empty.
 
-No collector reads this section yet. It is the contract the greenfield deployment controls are to
-be written against (PORT-PLAN P14). Today the preflight check reads it and warns, naming each key,
+This is the contract the greenfield deployment controls are written against (PORT-PLAN P14).
+DEP.TGT-01 reads TargetServers; the preflight check reads every key and warns, naming each one,
 when any is missing or empty. A missing deployment config is expected for an assessment of an
 existing organisation and never fails the run.
 
