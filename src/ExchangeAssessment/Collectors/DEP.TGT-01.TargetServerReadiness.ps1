@@ -420,6 +420,8 @@ function Get-ExchTargetState {
 
     DEP.TGT-01 calls it with its own CIM queries and WinRM reader. DEP.WIT-01 passes its own in
     -CimQuery and -RemoteReader, so both read a server the same way and record it the same way.
+    DEP.VOL-01 reads CIM only and passes -CimOnly, so WinRM is never contacted and WinRmState stays
+    NotAttempted, saying why.
     #>
     [CmdletBinding()]
     param(
@@ -429,7 +431,8 @@ function Get-ExchTargetState {
         [Parameter()][object[]]$RebootIndicators = @(),
         [Parameter()][object[]]$CimQuery = @(),
         [Parameter()][scriptblock]$RemoteReader = $null,
-        [Parameter()][object[]]$RemoteArgumentList = @()
+        [Parameter()][object[]]$RemoteArgumentList = @(),
+        [Parameter()][switch]$CimOnly
     )
 
     $state = [pscustomobject]@{
@@ -484,6 +487,11 @@ function Get-ExchTargetState {
     elseif ($state.Cim.Count -eq 0) { $state.CimState = 'Failed' }
     else { $state.CimState = 'Partial' }
     $state.CimError = (@($queries | Where-Object { $state.CimErrors.ContainsKey($_.Name) } | ForEach-Object { $state.CimErrors[$_.Name] }) -join '; ')
+
+    if ($CimOnly) {
+        $state.WinRmError = 'not attempted: the calling control reads CIM only'
+        return $state
+    }
 
     try {
         if ($null -ne $RemoteReader) { $state.Remote = Invoke-ExchTargetCommand -ComputerName $ComputerName -ScriptBlock $RemoteReader -ArgumentList $RemoteArgumentList }
@@ -831,8 +839,8 @@ function Get-ExchTargetMechanismGate {
     <#
     Whether the CIM classes and WinRM items a check needs were read from a target. Returns the
     mechanisms the check names, their state for the row, and for each one that was not read, why.
-    A check is attempted only when Blocked is empty. DEP.TGT-01 and DEP.WIT-01 both gate here, so a
-    mechanism that failed costs exactly the checks that need it, in both controls.
+    A check is attempted only when Blocked is empty. DEP.TGT-01, DEP.WIT-01 and DEP.VOL-01 all gate
+    here, so a mechanism that failed costs exactly the checks that need it, in every one of them.
     #>
     [CmdletBinding()]
     param(

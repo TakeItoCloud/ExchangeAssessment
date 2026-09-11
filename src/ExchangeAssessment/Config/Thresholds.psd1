@@ -544,6 +544,46 @@ statement it says so.
     }
 
     # --------------------------------------------------------------------------------------
+    # Database and log volumes on the greenfield target servers (DEP.VOL-01)
+    # A top-level key of its own, not under Deployment, for the reason PortProbe gives. Each
+    # value carries the Learn page it was read from and the date. A $null Value is one Learn
+    # does not state: its check reports Unknown until the operator supplies it with -ConfigPath,
+    # and nested tables merge, so an override may change Value alone.
+    # --------------------------------------------------------------------------------------
+    DeploymentVolumes = @{
+        FileSystems = @{
+            Value  = @('NTFS', 'ReFS')
+            Source = @(
+                'https://learn.microsoft.com/exchange/plan-and-deploy/deployment-ref/storage-configuration#best-practices-for-supported-storage-configurations'
+                'https://learn.microsoft.com/exchange/plan-and-deploy/system-requirements#hardware-requirements-for-exchange-server'
+            )
+            Read   = '2026-09-11'
+            Note   = 'storage-configuration, File system: "Supported: NTFS and ReFS." system-requirements: ReFS is "Supported on partitions that contain" mailbox databases and transaction logs.'
+        }
+        AllocationUnitBytes = @{
+            Value  = 65536
+            Source = @('https://learn.microsoft.com/exchange/plan-and-deploy/deployment-ref/storage-configuration#best-practices-for-supported-storage-configurations')
+            Read   = '2026-09-11'
+            Note   = 'NTFS and ReFS allocation unit size, stand-alone and high availability alike: "Supported: All allocation unit sizes. Best practice: 64 KB for both .edb and log file volumes." A best practice, not a requirement, so another size is reported and not failed.'
+        }
+        # $null: Learn states no absolute free-space figure for a database volume. It sizes the
+        # volume from the design instead, so the figure has to come from the operator's sizing.
+        DatabaseVolumeMinimumFreeGB = @{
+            Value  = $null
+            Source = @('https://learn.microsoft.com/exchange/plan-and-deploy/deployment-ref/storage-configuration#best-practices-for-supported-storage-configurations')
+            Read   = '2026-09-11'
+            Note   = 'Learn states no absolute free-space figure for a database volume; it sizes it from the design: "Provision for 120 percent of calculated maximum database size." Supply the figure your sizing gives with -ConfigPath.'
+        }
+        # $null: as above, for the log volume.
+        LogVolumeMinimumFreeGB = @{
+            Value  = $null
+            Source = @('https://learn.microsoft.com/exchange/plan-and-deploy/deployment-ref/storage-configuration#best-practices-for-supported-storage-configurations')
+            Read   = '2026-09-11'
+            Note   = 'Learn states no absolute free-space figure for a log volume; it sizes it from log generation: "Provision for three days of log generation capacity" (stand-alone) or "three days beyond replay lag setting of log generation capacity" (high availability). Supply the figure your sizing gives with -ConfigPath.'
+        }
+    }
+
+    # --------------------------------------------------------------------------------------
     # Reporting
     # --------------------------------------------------------------------------------------
     MaxRowsPerSection = 500

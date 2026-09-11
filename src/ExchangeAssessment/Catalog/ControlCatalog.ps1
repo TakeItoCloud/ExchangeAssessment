@@ -456,6 +456,34 @@ function Get-ExchControlCatalog {
             )
         }
         @{
+            controlId  = 'DEP.VOL-01'
+            domain     = 'Environment'
+            title      = 'Greenfield database and log volume readiness'
+            target     = 'On every member server named in Deployment.TargetServers, the volumes named in Deployment.DatabaseVolume and Deployment.LogVolume exist, hold the free space the operator''s sizing requires, and use a file system Microsoft supports for Exchange database and log files; the allocation unit size is reported against the 64 KB best practice, and whether the database and log volumes are the same volume is reported.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.8.6'; note='Capacity management' }
+                @{ framework='ISO27001:2022'; ref='A.5.30'; note='ICT readiness for a platform deployment' }
+            )
+            references = @(
+                @{ title='Exchange Server storage configuration options'; url='https://learn.microsoft.com/exchange/plan-and-deploy/deployment-ref/storage-configuration' }
+                @{ title='Exchange Server 2019 and Subscription Edition system requirements'; url='https://learn.microsoft.com/exchange/plan-and-deploy/system-requirements' }
+            )
+        }
+        @{
+            controlId  = 'DEP-01'
+            domain     = 'Environment'
+            title      = 'Greenfield deployment readiness (roll-up)'
+            target     = 'Every prerequisite this tool checks for a greenfield Exchange Server SE deployment was measured and met: the directory (ENV.VERS-01), the target servers, network reachability from them, the file share witness, the planned names, and the database and log volumes. It does not assert that Exchange Setup will succeed.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.5.30'; note='ICT readiness for a platform deployment' }
+                @{ framework='ISO27001:2022'; ref='A.8.9'; note='Configuration management before deployment' }
+            )
+            references = @(
+                @{ title='Exchange Server 2019 and SE prerequisites'; url='https://learn.microsoft.com/exchange/plan-and-deploy/prerequisites' }
+                @{ title='Exchange Server 2019 and Subscription Edition system requirements'; url='https://learn.microsoft.com/exchange/plan-and-deploy/system-requirements' }
+            )
+        }
+        @{
             controlId  = 'CLD.ORG-01'
             domain     = 'Cloud'
             title      = 'Exchange Online organisation configuration'

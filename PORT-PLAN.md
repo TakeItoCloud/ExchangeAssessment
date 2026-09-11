@@ -31,15 +31,18 @@ evaluate" from "passed", and the analyzer suspensions below are gone.
 | P14.2 | `DEP.NET-01` port reachability probed from each target server outward, `Config/PortMatrix.psd1` and `-PortMatrixPath` | In progress - green over mocks; first real run is P14.8 | 2026-09-11 |
 | P14.3 | `DEP.WIT-01` file share witness prerequisites | In progress - green over mocks; first real run is P14.9 | 2026-09-11 |
 | P14.4 | `DEP.NAME-01` name and DNS availability for the planned names | In progress - green over mocks; first real run is P14.10 | 2026-09-11 |
-| P14.5 | `DEP.VOL-01` database and log volume checks on the target servers (`DatabaseVolume`, `LogVolume`) | Planned | |
-| P14.6 | `DEP-01` greenfield roll-up, declaring `DEP.TGT-01` and the other `DEP.*` controls in `Requires` | Planned | |
+| P14.5 | `DEP.VOL-01` database and log volume checks on the target servers (`DatabaseVolume`, `LogVolume`) | In progress - green over mocks; first real run is P14.12 | 2026-09-11 |
+| P14.6 | `DEP-01` greenfield roll-up, declaring `ENV.VERS-01` and the five `DEP.*` controls in `Requires` | In progress - green over mocks; first end-to-end real run is P14.13 | 2026-09-11 |
 | P14.7 | First run of `DEP.TGT-01` against real target servers - owner: Carlos Annes (operator) | Planned | |
 | P14.8 | First run of `DEP.NET-01` from real target servers over a real network path - owner: Carlos Annes (operator) | Planned | |
 | P14.9 | First run of `DEP.WIT-01` against a real, sanitised witness server, before and after `/PrepareAD` - owner: Carlos Annes (operator) | Planned | |
 | P14.10 | First run of `DEP.NAME-01` against a real directory and real DNS - owner: Carlos Annes (operator) | Planned | |
 | P14.11 | Add `WitnessDirectory` to the P13 template and key list as an optional key, so the `DEP.WIT-01` witness directory check can be found from the template; preflight must not report it missing | Planned | |
+| P14.12 | First run of `DEP.VOL-01` against real target servers with real database and log volumes - owner: Carlos Annes (operator) | Planned | |
+| P14.13 | First end-to-end real run of `DEP-01`: one `Invoke-ExchAssess.ps1` run with a filled deployment config against a real, sanitised greenfield environment, all six upstream controls running - owner: Carlos Annes (operator) | Planned | |
 | P15 | Generate the P13 deployment config from an approval table | Planned | |
 | P16 | Test debt reported by P13: the comment-based help guard names one function, so it cannot catch the next export added without help, and the twelve older exports have none; and nothing runs the suite under Windows PowerShell 5.1 (see *P16*) | Planned | |
+| P17 | Reported by P14.6: `UPG-01`, and `ENV.VERS-01` within itself, combine an `Unknown` with a `Compliant` through `Get-ExchWorstOutcome`, which returns `Compliant`; decide whether they should fail closed as the `DEP.*` controls do (see *P17*) | Planned | |
 
 ## The 5.1 constraint
 
@@ -341,8 +344,44 @@ configuration search finds an existing DAG by name and reads `NoExchangeOrganiza
 not prepared for Exchange, and that `Resolve-DnsName -DnsOnly` separates `NameDoesNotExist` from
 `NoAddressRecord` against the client's resolvers. Record what differs from the mocks.
 
-**P14.5 and P14.6** are the remaining `DEP.*` controls. `DEP.VOL-01` is added so that the checks the
-template promises for `DatabaseVolume` and `LogVolume` are owned rather than implied.
+**P14.5 `DEP.VOL-01` - In progress 2026-09-11.** Owns the checks the P13 template promises for
+`DatabaseVolume` and `LogVolume`. On each target, over CIM only (`Get-ExchTargetState -CimOnly`, a new
+switch that leaves the other callers unchanged), for each supplied volume: a volume is mounted at
+exactly that path - a folder on another volume is reported as absent, naming the volume it would fall
+on, and that volume is never judged in its place; free space against `DeploymentVolumes`; NTFS or ReFS;
+and the allocation unit size. Once per target, whether the two are the same volume. Read on Learn on
+2026-09-11: storage-configuration gives "Supported: NTFS and ReFS" and, for allocation unit size,
+"Supported: All allocation unit sizes. Best practice: 64 KB", so another size is reported, not failed.
+Learn is not silent on separation, but it states a best practice that depends on the architecture -
+for a stand-alone server separate volumes "backed by different physical disks", for high availability
+"Isolation of logs and databases isn't required" - and no requirement, so a shared volume is reported
+for the reader and never failed. Learn gives no absolute free-space figure, so both minimums ship
+`$null` and that check is `Unknown` until the operator supplies them. Green over mocks only; P14.12 is
+the first real run.
+
+**P14.6 `DEP-01` - In progress 2026-09-11.** The greenfield counterpart of `UPG-01`, in its shape, and
+deliberately without its two Exchange-organisation dependencies: it requires `ENV.VERS-01` and the five
+`DEP.*` controls and not `EX.CH-01` or `ENV.OS-01`, both of which read `Get-ExchangeServer`. It fails
+closed where `UPG-01` does not: any prerequisite not assessed makes the verdict `Unknown` before
+`Get-ExchWorstOutcome` is consulted, so a `Compliant` never outvotes an `Unknown`, and a `Compliant` the
+upstream itself marked `SoftFail` or `HardFail` is not counted as passed. A control that did not run
+and one that ran and reported `Unknown` carry different statuses and messages. The rationale always
+writes three groups - passed, did not pass, could not be assessed with the cause - an empty one as
+`(0): none`. With the shipped reference files it cannot report `Compliant`; the README names every
+`$null` that stops it. Green over mocks only; P14.13 is the first end-to-end real run.
+
+**P14.12 - first real run of `DEP.VOL-01`. Owner: Carlos Annes (operator).** Against at least one real,
+sanitised target server with the planned volumes created: confirm that `Win32_Volume` over CIM returns
+`Name`, `DeviceID`, `FileSystem`, `FreeSpace` and `BlockSize` for a drive-letter volume and for a
+mount-point volume, that a mount point is matched by its own path and a folder is not, and that the
+free-space figures supplied from the sizing are judged. Record what differs from the mocks.
+
+**P14.13 - first end-to-end real run of `DEP-01`. Owner: Carlos Annes (operator).** One
+`Invoke-ExchAssess.ps1` run with a filled deployment config against a real, sanitised greenfield
+environment: confirm that all six upstream controls ran before `DEP-01` (`csv/run.collectors.csv`),
+that its three groups match their findings one for one, that a control skipped with
+`-SkipDomainQueries` reads "did not run", and what the verdict is before and after `/PrepareAD`. Record
+what differs from the mocks.
 
 ### P16 — Test debt reported by P13
 
@@ -356,6 +395,19 @@ Two gaps P13 reported and did not close:
   edition the module actually ships for. P13 and P14.1 exercised new code under 5.1 by direct
   execution only. Automate a 5.1 regression - a Pester 5 install for Windows PowerShell, or a
   `windows-latest` CI leg under `powershell`.
+
+### P17 — Roll-ups that let a Compliant outvote an Unknown
+
+Found while reading `UPG-01` as the model for `DEP-01`. `Get-ExchWorstOutcome` returns `Compliant` for
+`@('Compliant','Unknown')` - its own comment says "Unknown only wins when there is nothing else" - and
+`UPG-01` hands it an `Unknown` for an upstream that did not report. Run on the dev VM on 2026-09-11 with
+`EX.CH-01` absent from `-Upstream` and the other two `Compliant`, `UPG-01` returned outcome `Compliant`,
+sufficiency `SoftFail`, rationale "Not assessed: Supported Exchange product version and build.".
+`ENV.VERS-01` combines its own items the same way, so unreadable Exchange preparation values beside
+supported functional levels yield `Compliant` with sufficiency `SoftFail`. The `DEP.*` collectors avoid
+this by adding `Compliant` only when nothing else fired. Changing either would change what they report,
+so it is a phase of its own, with a `ModuleVersion` bump; `DEP-01` already reads a `SoftFail` `Compliant`
+as not assessed.
 
 ### Cosmetic backlog
 

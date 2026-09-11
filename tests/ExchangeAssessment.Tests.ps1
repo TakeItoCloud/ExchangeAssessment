@@ -2412,6 +2412,534 @@ Describe 'ExchangeAssessment' {
         }
     }
 
+    Context 'Volume readiness (DEP.VOL-01)' {
+
+        BeforeAll {
+            Import-Module -Name $script:ManifestPath -Force -ErrorAction Stop
+
+            $script:VolCollectorFile = Join-Path -Path $script:CollectorRoot -ChildPath 'DEP.VOL-01.VolumeReadiness.ps1'
+            $script:VolThresholds = & (Get-Module $script:ModuleName) { Import-ExchConfiguration }
+
+            # How many checks the collector declares, written here rather than read from the module:
+            # four on each supplied volume, and one per target comparing the two volumes.
+            $script:DeclaredVolumeChecksPerVolume = 4
+            $script:DeclaredVolumeChecksPerTarget = 1
+
+            # A synthetic run. Host names sit under the reserved .test top-level domain (RFC 2606),
+            # addresses in TEST-NET-1 (RFC 5737), and the volume GUIDs are fictional. The free-space
+            # minimums are supplied through the real -ConfigPath merge, overriding Value alone;
+            # -ShippedThresholds keeps the shipped $null.
+            function New-TestVolRun {
+                param([object[]]$Targets = @('mbx01.example.test', 'mbx02.example.test'), [string]$DatabaseVolume = 'D:', [string]$LogVolume = 'E:',
+                    [object]$DatabaseMinimumFreeGB = 100, [object]$LogMinimumFreeGB = 20, [switch]$ShippedThresholds, [switch]$NoDeployment)
+                $folder = Join-Path -Path $TestDrive -ChildPath ('run-' + [guid]::NewGuid())
+                New-Item -ItemType Directory -Path (Join-Path -Path $folder -ChildPath 'evidence') -Force | Out-Null
+                $config = @{}
+                foreach ($key in $script:VolThresholds.Keys) { $config[$key] = $script:VolThresholds[$key] }
+                if (-not $ShippedThresholds) {
+                    $override = @{ DeploymentVolumes = @{ DatabaseVolumeMinimumFreeGB = @{ Value = $DatabaseMinimumFreeGB }; LogVolumeMinimumFreeGB = @{ Value = $LogMinimumFreeGB } } }
+                    $config = & (Get-Module $script:ModuleName) { param($b, $o) Merge-ExchConfigTable -Base $b -Override $o } $config $override
+                }
+                if (-not $NoDeployment) { $config['Deployment'] = @{ TargetServers = $Targets; DatabaseVolume = $DatabaseVolume; LogVolume = $LogVolume; DagName = 'DAG01' } }
+                [pscustomobject]@{
+                    RunId = 'test'; TenantHint = 'test'; RunFolder = $folder
+                    LogPath = (Join-Path -Path $folder -ChildPath 'run.jsonl'); ConfigPath = ''
+                    Config = $config; Flags = @{}
+                    Errors = (New-Object System.Collections.Generic.List[object])
+                }
+            }
+
+            # What a target returns from Win32_Volume by default: the system volume, a 1 TB NTFS
+            # database volume and a 256 GB ReFS log volume, both formatted with 64 KB units.
+            function Get-TestVolume {
+                if ($script:VolScenario.ContainsKey('Volumes')) { return $script:VolScenario.Volumes }
+                [pscustomobject]@{ Name = 'C:\'; DeviceID = '\\?\Volume{00000000-0000-0000-0000-00000000000c}\'; DriveLetter = 'C:'; FileSystem = 'NTFS'; Capacity = 200GB; FreeSpace = 100GB; BlockSize = 4096 }
+                [pscustomobject]@{ Name = 'D:\'; DeviceID = '\\?\Volume{00000000-0000-0000-0000-00000000000d}\'; DriveLetter = 'D:'; FileSystem = 'NTFS'; Capacity = 1024GB; FreeSpace = 900GB; BlockSize = 65536 }
+                [pscustomobject]@{ Name = 'E:\'; DeviceID = '\\?\Volume{00000000-0000-0000-0000-00000000000e}\'; DriveLetter = 'E:'; FileSystem = 'ReFS'; Capacity = 256GB; FreeSpace = 200GB; BlockSize = 65536 }
+            }
+
+            function Invoke-TestVol {
+                param($Run)
+                & (Get-Module $script:ModuleName) { param($r) Invoke-ExchCollector_DEP_VOL_01_VolumeReadiness -Run $r } $Run
+            }
+
+            function Get-TestVolRow {
+                param($Result, [string]$Server = 'mbx01.example.test', [string]$Role, [string]$Check)
+                @($Result.findings[0].result.metrics.checks | Where-Object { $_.Server -eq $Server -and $_.Role -eq $Role -and $_.Check -eq $Check })[0]
+            }
+
+            $script:VolScenario = @{}
+
+            # Every remote call is mocked. The collector reaches a target only through name resolution
+            # and CIM; WinRM throws, so any use of it would surface.
+            Mock -ModuleName $script:ModuleName Resolve-ExchTargetName {
+                if (@($script:VolScenario.Unresolvable) -contains $Name) { return [pscustomobject]@{ Resolved = $false; Addresses = @(); Error = 'No such host is known (test)' } }
+                [pscustomobject]@{ Resolved = $true; Addresses = @('192.0.2.10'); Error = '' }
+            }
+            Mock -ModuleName $script:ModuleName Get-ExchTargetCimInstance {
+                if (@($script:VolScenario.CimDown) -contains $ComputerName) { throw "CIM connection to $ComputerName refused (test)" }
+                if ($ClassName -ne 'Win32_Volume') { throw "Unexpected CIM class in test: $ClassName" }
+                Get-TestVolume
+            }
+            Mock -ModuleName $script:ModuleName Invoke-ExchTargetCommand { throw 'DEP.VOL-01 must not use WinRM (test)' }
+        }
+
+        BeforeEach { $script:VolScenario = @{} }
+
+        It 'registers DEP.VOL-01 as a well-formed row whose function resolves, under the existing switch and category' {
+            $rows = @(& (Get-Module $script:ModuleName) { Get-ExchCollectorRegistry } | Where-Object { $_.Id -eq 'DEP.VOL-01' })
+            $rows.Count | Should -Be 1
+            $rows[0].Function | Should -Be 'Invoke-ExchCollector_DEP_VOL_01_VolumeReadiness'
+            $rows[0].Area | Should -Be 'Deployment'
+            @($rows[0].Requires).Count | Should -Be 0
+            $rows[0].Cloud | Should -BeFalse
+            $rows[0].SkipFlag | Should -Be 'SkipDeploymentChecks'
+            (& (Get-Module $script:ModuleName) { param($n) Get-Command -Name $n -CommandType Function -ErrorAction SilentlyContinue } $rows[0].Function).Parameters.Keys | Should -Contain 'Run'
+            (& (Get-Module $script:ModuleName) { Get-ExchControlById -ControlId 'DEP.VOL-01' }).domain |
+                Should -Be (& (Get-Module $script:ModuleName) { Get-ExchControlById -ControlId 'DEP.TGT-01' }).domain
+        }
+
+        It 'reports exactly one Unknown finding naming the missing keys and carrying the three P13 strings when neither volume was supplied, and contacts nothing' {
+            $template = & (Get-Module $script:ModuleName) { Get-ExchDeploymentTemplatePath }
+            foreach ($run in @((New-TestVolRun -NoDeployment), (New-TestVolRun -DatabaseVolume '' -LogVolume ''), (New-TestVolRun -DatabaseVolume '   ' -LogVolume ''))) {
+                $result = Invoke-TestVol -Run $run
+                @($result.findings).Count | Should -Be 1
+                @($result.sections).Count | Should -Be 0
+                $finding = $result.findings[0]
+                $finding.controlId | Should -Be 'DEP.VOL-01'
+                $finding.result.outcome | Should -Be 'Unknown'
+                $finding.severity | Should -Be 'Info'
+                $rationale = $finding.result.rationale
+                $rationale | Should -Match 'Deployment\.DatabaseVolume, Deployment\.LogVolume are empty or absent'
+                $rationale.Contains($template) | Should -BeTrue -Because "the rationale must carry the template path $template"
+                $rationale.Contains('New-ExchDeploymentConfig -Path .\Deployment.psd1') | Should -BeTrue
+                $rationale.Contains('-ConfigPath .\Deployment.psd1') | Should -BeTrue
+                $rationale | Should -Match 'does not mean the volumes are ready'
+            }
+
+            $noTargets = (Invoke-TestVol -Run (New-TestVolRun -Targets @())).findings[0].result.rationale
+            $noTargets | Should -Match 'Deployment\.TargetServers is empty or absent'
+            $noTargets | Should -Not -Match 'Deployment\.DatabaseVolume'
+
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Resolve-ExchTargetName -Times 0 -Exactly
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Get-ExchTargetCimInstance -Times 0 -Exactly
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Invoke-ExchTargetCommand -Times 0 -Exactly
+        }
+
+        It 'checks the volume that was supplied and names the key that was not, never comparing against a volume nobody named' {
+            $result = Invoke-TestVol -Run (New-TestVolRun -Targets @('mbx01.example.test') -LogVolume '')
+            $rows = @($result.findings[0].result.metrics.checks)
+            $databaseRows = @($rows | Where-Object { $_.Role -eq 'DatabaseVolume' })
+            $databaseRows.Count | Should -Be $script:DeclaredVolumeChecksPerVolume
+            foreach ($row in $databaseRows) { $row.Outcome | Should -Be 'Compliant' -Because "$($row.Check) on D: is met in the mocks" }
+            @($rows | Where-Object { $_.Role -eq 'LogVolume' }).Count | Should -Be 0
+
+            $compare = Get-TestVolRow -Result $result -Role 'DatabaseVolume+LogVolume' -Check 'DistinctVolumes'
+            $compare.Outcome | Should -Be 'Unknown'
+            $compare.Cause | Should -Match 'Deployment\.LogVolume was not supplied'
+            $result.findings[0].result.outcome | Should -Be 'Unknown'
+            $result.findings[0].result.rationale | Should -Match 'Deployment\.LogVolume was not supplied'
+            $result.findings[0].result.rationale.Contains('New-ExchDeploymentConfig -Path .\Deployment.psd1') | Should -BeTrue
+        }
+
+        It 'reports a named volume that is not mounted as absent, names the volume a folder path would fall on, and judges nothing in its place' {
+            $result = Invoke-TestVol -Run (New-TestVolRun -Targets @('mbx01.example.test') -DatabaseVolume 'D:\ExchangeDatabases' -LogVolume 'L:')
+
+            $database = Get-TestVolRow -Result $result -Role 'DatabaseVolume' -Check 'VolumeExists'
+            $database.Outcome | Should -Be 'NonCompliant'
+            $database.Measured | Should -Match 'falls on D:\\$'
+            $database.Cause | Should -Match 'not the volume Deployment\.DatabaseVolume names'
+            $log = Get-TestVolRow -Result $result -Role 'LogVolume' -Check 'VolumeExists'
+            $log.Outcome | Should -Be 'NonCompliant'
+            $log.Cause | Should -Match 'No volume is mounted at L:\\ on mbx01\.example\.test'
+
+            foreach ($role in @('DatabaseVolume', 'LogVolume')) {
+                foreach ($check in @('FreeSpace', 'FileSystem', 'AllocationUnitSize')) {
+                    $row = Get-TestVolRow -Result $result -Role $role -Check $check
+                    $row.Outcome | Should -Be 'Unknown' -Because "$role $check has no volume to measure, and D: must not be judged in its place"
+                    $row.Cause | Should -Match '^Not measured: no volume is mounted'
+                }
+            }
+            (Get-TestVolRow -Result $result -Role 'DatabaseVolume+LogVolume' -Check 'DistinctVolumes').Cause | Should -Match '^Not compared'
+            $result.findings[0].result.outcome | Should -Be 'NonCompliant'
+            $result.findings[0].result.rationale | Should -Match '2 volume checks failed'
+        }
+
+        It 'reports free space below the operator''s minimum as failed, and the shipped $null minimum as Unknown naming the key - never as a pass' {
+            $below = Invoke-TestVol -Run (New-TestVolRun -Targets @('mbx01.example.test') -DatabaseMinimumFreeGB 1000)
+            $row = Get-TestVolRow -Result $below -Role 'DatabaseVolume' -Check 'FreeSpace'
+            $row.Outcome | Should -Be 'NonCompliant'
+            $row.Measured | Should -Be '900 GB free'
+            $row.Required | Should -Match '^>= 1000 GB free'
+            (Get-TestVolRow -Result $below -Role 'LogVolume' -Check 'FreeSpace').Outcome | Should -Be 'Compliant'
+            $below.findings[0].result.outcome | Should -Be 'NonCompliant'
+
+            $shipped = Invoke-TestVol -Run (New-TestVolRun -Targets @('mbx01.example.test') -ShippedThresholds)
+            foreach ($role in @('DatabaseVolume', 'LogVolume')) {
+                $row = Get-TestVolRow -Result $shipped -Role $role -Check 'FreeSpace'
+                $row.Outcome | Should -Be 'Unknown'
+                $row.Cause | Should -Match ('^No value: DeploymentVolumes\.{0}MinimumFreeGB' -f $role)
+                $row.Measured | Should -Match 'GB free$' -Because 'what was measured is still reported'
+            }
+            $shipped.findings[0].result.outcome | Should -Be 'Unknown'
+        }
+
+        It 'reports database and log on the same volume as the same volume, quoting what Learn states for each architecture, and does not fail it' {
+            foreach ($pair in @(@('D:', 'd:\'), @('D:\', 'D:'))) {
+                $result = Invoke-TestVol -Run (New-TestVolRun -Targets @('mbx01.example.test') -DatabaseVolume $pair[0] -LogVolume $pair[1])
+                $row = Get-TestVolRow -Result $result -Role 'DatabaseVolume+LogVolume' -Check 'DistinctVolumes'
+                $row.Outcome | Should -Be 'PartiallyCompliant'
+                $row.Measured | Should -Match '^same volume'
+                $row.Cause | Should -Match 'Learn states no requirement either way'
+                $row.Cause | Should -Match 'different volumes backed by different physical disks'
+                $row.Cause | Should -Match "Isolation of logs and databases isn't required"
+                $row.Cause | Should -Match 'Reported for the reader to judge, not failed'
+                @($result.findings[0].result.metrics.sameVolumeServers) | Should -Be @('mbx01.example.test')
+                $result.findings[0].result.outcome | Should -Be 'PartiallyCompliant'
+            }
+
+            # Two different paths that Win32_Volume reports as one DeviceID are one volume.
+            $script:VolScenario = @{ Volumes = @(
+                [pscustomobject]@{ Name = 'D:\'; DeviceID = '\\?\Volume{00000000-0000-0000-0000-00000000000d}\'; FileSystem = 'NTFS'; FreeSpace = 900GB; BlockSize = 65536 }
+                [pscustomobject]@{ Name = 'C:\Mounts\Logs\'; DeviceID = '\\?\Volume{00000000-0000-0000-0000-00000000000d}\'; FileSystem = 'NTFS'; FreeSpace = 900GB; BlockSize = 65536 }
+            ) }
+            $byDevice = Invoke-TestVol -Run (New-TestVolRun -Targets @('mbx01.example.test') -LogVolume 'C:\Mounts\Logs')
+            (Get-TestVolRow -Result $byDevice -Role 'DatabaseVolume+LogVolume' -Check 'DistinctVolumes').Measured | Should -Match '^same volume'
+            $script:VolScenario = @{}
+
+            $distinct = Invoke-TestVol -Run (New-TestVolRun -Targets @('mbx01.example.test'))
+            $row = Get-TestVolRow -Result $distinct -Role 'DatabaseVolume+LogVolume' -Check 'DistinctVolumes'
+            $row.Outcome | Should -Be 'Compliant'
+            $row.Measured | Should -Match '^distinct: databases on D:\\'
+            @($distinct.findings[0].result.metrics.sameVolumeServers).Count | Should -Be 0
+        }
+
+        It 'reports every check on a target that does not answer CIM as Unknown naming the error, never contacts a name that does not resolve, never uses WinRM, and leaves the other target alone' {
+            $script:VolScenario = @{ CimDown = @('mbx02.example.test'); Unresolvable = @('mbx03.example.test') }
+            $result = Invoke-TestVol -Run (New-TestVolRun -Targets @('mbx01.example.test', 'mbx02.example.test', 'mbx03.example.test'))
+            $rows = @($result.findings[0].result.metrics.checks)
+            $perTarget = (2 * $script:DeclaredVolumeChecksPerVolume) + $script:DeclaredVolumeChecksPerTarget
+
+            $down = @($rows | Where-Object { $_.Server -eq 'mbx02.example.test' })
+            $down.Count | Should -Be $perTarget
+            foreach ($row in $down) {
+                $row.Outcome | Should -Be 'Unknown'
+                $row.Cause | Should -Match 'CIM connection to mbx02\.example\.test refused \(test\)'
+            }
+            $unresolved = @($rows | Where-Object { $_.Server -eq 'mbx03.example.test' })
+            $unresolved.Count | Should -Be $perTarget
+            foreach ($row in $unresolved) {
+                $row.Outcome | Should -Be 'Unknown'
+                $row.Cause | Should -Match 'did not resolve'
+            }
+            foreach ($row in @($rows | Where-Object { $_.Server -eq 'mbx01.example.test' })) {
+                $row.Outcome | Should -Be 'Compliant' -Because "$($row.Role) $($row.Check) is met on the target that answered"
+            }
+
+            $servers = @($result.findings[0].result.metrics.servers)
+            @($servers | Where-Object { $_.Server -eq 'mbx02.example.test' })[0].Status | Should -Be 'Unreachable'
+            @($servers | Where-Object { $_.Server -eq 'mbx03.example.test' })[0].Status | Should -Be 'NameDoesNotResolve'
+            $result.findings[0].result.outcome | Should -Be 'Unknown'
+            $result.findings[0].result.rationale | Should -Match 'did not answer CIM'
+            $result.findings[0].result.rationale | Should -Match 'do not resolve'
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Get-ExchTargetCimInstance -ParameterFilter { $ComputerName -eq 'mbx03.example.test' } -Times 0 -Exactly
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Invoke-ExchTargetCommand -Times 0 -Exactly
+        }
+
+        It 'evaluates all 9 declared checks per target with both volumes supplied - 4 on each volume and 1 comparing them - counted from the collector file''s text' {
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:VolCollectorFile, [ref]$null, [ref]$null)
+            $definition = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-ExchVolumeCheckDefinition' }, $true)
+            $declared = @([regex]::Matches($definition.Extent.Text, "Check = '(?<check>\w+)';\s+Scope = '(?<scope>\w+)'") | ForEach-Object { [pscustomobject]@{ Check = $_.Groups['check'].Value; Scope = $_.Groups['scope'].Value } })
+            @($declared | Where-Object { $_.Scope -eq 'PerVolume' }).Count | Should -Be $script:DeclaredVolumeChecksPerVolume
+            @($declared | Where-Object { $_.Scope -eq 'PerTarget' }).Count | Should -Be $script:DeclaredVolumeChecksPerTarget
+            $declared.Count | Should -Be ($script:DeclaredVolumeChecksPerVolume + $script:DeclaredVolumeChecksPerTarget)
+
+            $targets = @('mbx01.example.test', 'mbx02.example.test')
+            $result = Invoke-TestVol -Run (New-TestVolRun -Targets $targets)
+            $rows = @($result.findings[0].result.metrics.checks)
+            $rows.Count | Should -Be ($targets.Count * ((2 * $script:DeclaredVolumeChecksPerVolume) + $script:DeclaredVolumeChecksPerTarget))
+            foreach ($target in $targets) {
+                foreach ($item in $declared) {
+                    $roles = if ($item.Scope -eq 'PerVolume') { @('DatabaseVolume', 'LogVolume') } else { @('DatabaseVolume+LogVolume') }
+                    foreach ($role in $roles) {
+                        @($rows | Where-Object { $_.Server -eq $target -and $_.Role -eq $role -and $_.Check -eq $item.Check }).Count | Should -Be 1 -Because "$target $role needs its $($item.Check) check"
+                    }
+                }
+            }
+            foreach ($row in $rows) { $row.Outcome | Should -Be 'Compliant' -Because "$($row.Server) $($row.Role) $($row.Check) is met in the mocks" }
+            $result.findings[0].result.outcome | Should -Be 'Compliant'
+            $result.findings[0].result.rationale | Should -Match 'Not read: whether two distinct volumes sit on different physical disks'
+        }
+
+        It 'judges file system and allocation unit size as Learn states them: NTFS and ReFS supported and anything else failed, a size other than 64 KB reported and not failed' {
+            $script:VolScenario = @{ Volumes = @(
+                [pscustomobject]@{ Name = 'D:\'; DeviceID = '\\?\Volume{00000000-0000-0000-0000-00000000000d}\'; FileSystem = 'FAT32'; FreeSpace = 900GB; BlockSize = 65536 }
+                [pscustomobject]@{ Name = 'E:\'; DeviceID = '\\?\Volume{00000000-0000-0000-0000-00000000000e}\'; FileSystem = 'NTFS'; FreeSpace = 200GB; BlockSize = 4096 }
+            ) }
+            $result = Invoke-TestVol -Run (New-TestVolRun -Targets @('mbx01.example.test'))
+
+            $fat = Get-TestVolRow -Result $result -Role 'DatabaseVolume' -Check 'FileSystem'
+            $fat.Outcome | Should -Be 'NonCompliant'
+            $fat.Cause | Should -Match 'Supported: NTFS and ReFS'
+            (Get-TestVolRow -Result $result -Role 'LogVolume' -Check 'FileSystem').Outcome | Should -Be 'Compliant'
+
+            $unit = Get-TestVolRow -Result $result -Role 'LogVolume' -Check 'AllocationUnitSize'
+            $unit.Outcome | Should -Be 'PartiallyCompliant'
+            $unit.Measured | Should -Be '4096 bytes'
+            $unit.Cause | Should -Match 'Supported: All allocation unit sizes'
+            $unit.Cause | Should -Match 'not failed'
+            (Get-TestVolRow -Result $result -Role 'DatabaseVolume' -Check 'AllocationUnitSize').Outcome | Should -Be 'Compliant'
+            $result.findings[0].result.outcome | Should -Be 'NonCompliant'
+        }
+
+        It 'records a Learn URL and read date next to every volume value, and ships the free-space minimums $null because Learn states no absolute figure' {
+            $table = (Import-PowerShellDataFile -Path (Join-Path -Path $script:ToolRoot -ChildPath 'Config/Thresholds.psd1')).DeploymentVolumes
+            @($table.Keys).Count | Should -Be 4
+            foreach ($key in $table.Keys) {
+                $entry = $table[$key]
+                $entry.Contains('Value') | Should -BeTrue -Because "$key must carry a Value, even a null one"
+                foreach ($source in @($entry.Source)) { $source | Should -Match '^https://learn\.microsoft\.com/' }
+                $entry.Read | Should -Match '^\d{4}-\d{2}-\d{2}$'
+                $entry.Note | Should -Not -BeNullOrEmpty
+            }
+            @($table.FileSystems.Value) | Should -Be @('NTFS', 'ReFS')
+            $table.AllocationUnitBytes.Value | Should -Be 65536
+            $table.DatabaseVolumeMinimumFreeGB.Value | Should -BeNullOrEmpty
+            $table.DatabaseVolumeMinimumFreeGB.Note | Should -Match '120 percent'
+            $table.LogVolumeMinimumFreeGB.Value | Should -BeNullOrEmpty
+            $table.LogVolumeMinimumFreeGB.Note | Should -Match 'three days'
+        }
+    }
+
+    Context 'Deployment readiness roll-up (DEP-01)' {
+
+        BeforeAll {
+            Import-Module -Name $script:ManifestPath -Force -ErrorAction Stop
+
+            $script:RollupCollectorFile = Join-Path -Path $script:CollectorRoot -ChildPath 'DEP-01.DeploymentReadiness.ps1'
+
+            # The population DEP-01 rolls up, written here rather than read from the module: the
+            # directory control and every greenfield DEP.* control.
+            $script:DeclaredRollupPopulation = @('ENV.VERS-01', 'DEP.TGT-01', 'DEP.NET-01', 'DEP.WIT-01', 'DEP.NAME-01', 'DEP.VOL-01')
+            $script:DeclaredRollupCount = 6
+
+            function New-TestRollupRun {
+                param([switch]$NoDeployment)
+                $folder = Join-Path -Path $TestDrive -ChildPath ('run-' + [guid]::NewGuid())
+                New-Item -ItemType Directory -Path (Join-Path -Path $folder -ChildPath 'evidence') -Force | Out-Null
+                $config = if ($NoDeployment) { @{} } else { @{ Deployment = @{
+                    TargetServers = @('mbx01.example.test'); WitnessServer = 'fsw01.example.test'; DagName = 'DAG01'
+                    InternalNames = @('mail.example.test'); DatabaseVolume = 'D:'; LogVolume = 'E:'
+                } } }
+                [pscustomobject]@{
+                    RunId = 'test'; TenantHint = 'test'; RunFolder = $folder
+                    LogPath = (Join-Path -Path $folder -ChildPath 'run.jsonl'); ConfigPath = ''
+                    Config = $config; Flags = @{}
+                    Errors = (New-Object System.Collections.Generic.List[object])
+                }
+            }
+
+            # One upstream collector result, in the shape Invoke-ExchCollection hands to -Upstream.
+            function New-TestUpstreamResult {
+                param([string]$ControlId, [string]$Outcome = 'Compliant', [string]$Sufficiency = 'Pass', [string]$Rationale = '')
+                if (-not $Rationale) { $Rationale = "$ControlId measured everything it checks (test)." }
+                [pscustomobject]@{ sections = @(); findings = @([pscustomobject]@{
+                    controlId = $ControlId; severity = 'Low'
+                    result    = [pscustomobject]@{ outcome = $Outcome; sufficiency = $Sufficiency; rationale = $Rationale; metrics = @{} }
+                }) }
+            }
+
+            # Every declared upstream reporting Compliant, unless overridden or left out.
+            function New-TestUpstream {
+                param([hashtable]$Override = @{}, [string[]]$Omit = @())
+                $upstream = @{}
+                foreach ($id in $script:DeclaredRollupPopulation) {
+                    if ($Omit -contains $id) { continue }
+                    $upstream[$id] = if ($Override.ContainsKey($id)) { $Override[$id] } else { New-TestUpstreamResult -ControlId $id }
+                }
+                $upstream
+            }
+
+            function Invoke-TestRollup {
+                param($Run, [hashtable]$Upstream)
+                & (Get-Module $script:ModuleName) { param($r, $u) Invoke-ExchCollector_DEP_01_DeploymentReadiness -Run $r -Upstream $u } $Run $Upstream
+            }
+
+            function Get-TestRollupRow {
+                param($Result, [string]$ControlId)
+                @($Result.findings[0].result.metrics.rows | Where-Object { $_.ControlId -eq $ControlId })[0]
+            }
+        }
+
+        It 'registers DEP-01 as a well-formed row whose function resolves, under the existing switch and category, and does not require EX.CH-01 or ENV.OS-01' {
+            $rows = @(& (Get-Module $script:ModuleName) { Get-ExchCollectorRegistry } | Where-Object { $_.Id -eq 'DEP-01' })
+            $rows.Count | Should -Be 1
+            $row = $rows[0]
+            $row.Function | Should -Be 'Invoke-ExchCollector_DEP_01_DeploymentReadiness'
+            $row.Area | Should -Be 'Deployment'
+            $row.Cloud | Should -BeFalse
+            $row.SkipFlag | Should -Be 'SkipDeploymentChecks'
+            $command = & (Get-Module $script:ModuleName) { param($n) Get-Command -Name $n -CommandType Function -ErrorAction SilentlyContinue } $row.Function
+            $command.Parameters.Keys | Should -Contain 'Run'
+            $command.Parameters.Keys | Should -Contain 'Upstream'
+            (& (Get-Module $script:ModuleName) { Get-ExchControlById -ControlId 'DEP-01' }).domain |
+                Should -Be (& (Get-Module $script:ModuleName) { Get-ExchControlById -ControlId 'DEP.TGT-01' }).domain
+
+            # Both read the servers Get-ExchangeServer returns, and a greenfield deployment has none.
+            @($row.Requires) | Should -Not -Contain 'EX.CH-01'
+            @($row.Requires) | Should -Not -Contain 'ENV.OS-01'
+            # ...and the header says so, so the asymmetry with UPG-01 is not later "fixed".
+            $text = Get-Content -LiteralPath $script:RollupCollectorFile -Raw
+            $header = $text.Substring(0, $text.IndexOf('Set-StrictMode'))
+            $header | Should -Match 'EX\.CH-01 and ENV\.OS-01'
+            $header | Should -Match 'existing Exchange organisation'
+            $header | Should -Match 'do not "fix" it'
+
+            # It measures nothing itself: no directory, CIM, WinRM, DNS or Exchange call in the file.
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:RollupCollectorFile, [ref]$null, [ref]$null)
+            $calls = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ })
+            @($calls | Where-Object { $_ -match '^(Get-AD|Get-Cim|Invoke-Command|Resolve-DnsName|Get-ExchangeServer|Get-ExchTargetState|Invoke-ExchTargetCommand|Resolve-ExchTargetName|Find-ExchDirectory)' }) | Should -BeNullOrEmpty
+        }
+
+        It 'requires exactly the 6 controls ENV.VERS-01, DEP.TGT-01, DEP.NET-01, DEP.WIT-01, DEP.NAME-01 and DEP.VOL-01 - every DEP.* control in the registry plus ENV.VERS-01 - and reads exactly those' {
+            $registry = @(& (Get-Module $script:ModuleName) { Get-ExchCollectorRegistry })
+            $requires = @(@($registry | Where-Object { $_.Id -eq 'DEP-01' })[0].Requires)
+            $requires.Count | Should -Be $script:DeclaredRollupCount
+            @($requires | Sort-Object) | Should -Be @($script:DeclaredRollupPopulation | Sort-Object)
+
+            # Derived a second way, from the registry itself: the directory control and every DEP.* control.
+            $derived = @(@('ENV.VERS-01') + @($registry | Where-Object { $_.Id -like 'DEP.*' } | ForEach-Object { $_.Id }))
+            $derived.Count | Should -Be $script:DeclaredRollupCount
+            @($derived | Sort-Object) | Should -Be @($requires | Sort-Object)
+
+            # ...and a third, from the collector's text: the controls it reads are the ones it requires.
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:RollupCollectorFile, [ref]$null, [ref]$null)
+            $definition = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-ExchDeploymentReadinessPrerequisite' }, $true)
+            $read = @([regex]::Matches($definition.Extent.Text, "Key = '(?<id>[\w.\-]+)'") | ForEach-Object { $_.Groups['id'].Value })
+            @($read | Sort-Object) | Should -Be @($requires | Sort-Object)
+
+            # The dispatcher runs every one of them first.
+            $ordered = @(& (Get-Module $script:ModuleName) { Get-ExchCollectorOrder } | ForEach-Object { $_.Id })
+            foreach ($id in $requires) { [array]::IndexOf($ordered, $id) | Should -BeLessThan ([array]::IndexOf($ordered, 'DEP-01')) -Because "$id must run before DEP-01" }
+        }
+
+        It 'reports Compliant when every one of the 6 upstream controls reported Compliant with sufficiency Pass, and says what Compliant does not mean' {
+            $result = Invoke-TestRollup -Run (New-TestRollupRun) -Upstream (New-TestUpstream)
+            @($result.findings).Count | Should -Be 1
+            $finding = $result.findings[0]
+            $finding.controlId | Should -Be 'DEP-01'
+            $finding.result.outcome | Should -Be 'Compliant'
+            $finding.severity | Should -Be 'Low'
+            $finding.result.sufficiency | Should -Be 'Pass'
+            @($finding.result.metrics.passed).Count | Should -Be $script:DeclaredRollupCount
+            $finding.result.rationale | Should -Match 'Measured and passed \(6\): '
+            $finding.result.rationale | Should -Match 'does not mean Exchange Setup will succeed'
+        }
+
+        It 'reports Unknown when any one upstream control reported Unknown, naming that control and its reason - a Compliant never outvotes it' {
+            foreach ($id in $script:DeclaredRollupPopulation) {
+                $upstream = New-TestUpstream -Override @{ $id = (New-TestUpstreamResult -ControlId $id -Outcome 'Unknown' -Sufficiency 'HardFail' -Rationale "$id could not read its source (test).") }
+                $result = Invoke-TestRollup -Run (New-TestRollupRun) -Upstream $upstream
+                $finding = $result.findings[0]
+                $finding.result.outcome | Should -Be 'Unknown' -Because "$id reported Unknown and the other five Compliant"
+
+                $row = Get-TestRollupRow -Result $result -ControlId $id
+                $row.Status | Should -Be 'Reported'
+                $row.Group | Should -Be 'NotAssessed'
+                $row.Cause | Should -Be "ran and reported Unknown: $id could not read its source (test)"
+                @($finding.result.metrics.reportedUnknown) | Should -Be @($id)
+                @($finding.result.metrics.notRun).Count | Should -Be 0
+                $finding.result.rationale | Should -Match ('Could not be assessed \(1\): {0} ' -f [regex]::Escape($id))
+                $finding.result.rationale | Should -Match ('{0} could not read its source \(test\)' -f [regex]::Escape($id))
+            }
+        }
+
+        It 'reports Unknown when an upstream control did not run at all, and says so differently from one that ran and reported Unknown' {
+            foreach ($id in $script:DeclaredRollupPopulation) {
+                $missing = Invoke-TestRollup -Run (New-TestRollupRun) -Upstream (New-TestUpstream -Omit @($id))
+                $unknown = Invoke-TestRollup -Run (New-TestRollupRun) -Upstream (New-TestUpstream -Override @{ $id = (New-TestUpstreamResult -ControlId $id -Outcome 'Unknown' -Sufficiency 'HardFail') })
+
+                $missing.findings[0].result.outcome | Should -Be 'Unknown' -Because "$id did not run, and an absence is not a pass"
+                $notRun = Get-TestRollupRow -Result $missing -ControlId $id
+                $notRun.Status | Should -Be 'DidNotRun'
+                $notRun.Outcome | Should -Be ''
+                $notRun.Group | Should -Be 'NotAssessed'
+                $notRun.Cause | Should -Match '^did not run: no result from it reached DEP-01'
+                @($missing.findings[0].result.metrics.notRun) | Should -Be @($id)
+                @($missing.findings[0].result.metrics.reportedUnknown).Count | Should -Be 0
+
+                $reported = Get-TestRollupRow -Result $unknown -ControlId $id
+                $reported.Status | Should -Be 'Reported'
+                $reported.Cause | Should -Match '^ran and reported Unknown'
+                $reported.Status | Should -Not -Be $notRun.Status
+                $reported.Cause | Should -Not -Be $notRun.Cause
+                @($unknown.findings[0].result.metrics.notRun).Count | Should -Be 0
+            }
+
+            # A result that carries no finding under its own control id is a third cause, not a pass.
+            $noFinding = Invoke-TestRollup -Run (New-TestRollupRun) -Upstream (New-TestUpstream -Override @{ 'DEP.VOL-01' = [pscustomobject]@{ sections = @(); findings = @() } })
+            (Get-TestRollupRow -Result $noFinding -ControlId 'DEP.VOL-01').Status | Should -Be 'NoFinding'
+            $noFinding.findings[0].result.outcome | Should -Be 'Unknown'
+        }
+
+        It 'writes all three groups - passed, did not pass, could not be assessed - even when one is empty, an empty group as a measured zero' {
+            $groups = @('Measured and passed', 'Measured and did not pass', 'Could not be assessed')
+
+            $allPassed = (Invoke-TestRollup -Run (New-TestRollupRun) -Upstream (New-TestUpstream)).findings[0]
+            $noneRan   = (Invoke-TestRollup -Run (New-TestRollupRun) -Upstream @{}).findings[0]
+            $mixed     = (Invoke-TestRollup -Run (New-TestRollupRun) -Upstream (New-TestUpstream -Omit @('DEP.VOL-01') -Override @{
+                'DEP.TGT-01' = (New-TestUpstreamResult -ControlId 'DEP.TGT-01' -Outcome 'NonCompliant' -Rationale 'mbx01 lacks a prerequisite (test).')
+                'DEP.NET-01' = (New-TestUpstreamResult -ControlId 'DEP.NET-01' -Outcome 'Unknown' -Sufficiency 'SoftFail' -Rationale 'a flow timed out (test).')
+            })).findings[0]
+
+            foreach ($finding in @($allPassed, $noneRan, $mixed)) {
+                foreach ($group in $groups) { $finding.result.rationale | Should -Match ('{0} \(\d+\): ' -f $group) -Because "the '$group' group is always written" }
+            }
+            $allPassed.result.rationale | Should -Match 'Measured and did not pass \(0\): none'
+            $allPassed.result.rationale | Should -Match 'Could not be assessed \(0\): none'
+
+            $noneRan.result.rationale | Should -Match 'Measured and passed \(0\): none'
+            $noneRan.result.rationale | Should -Match 'Measured and did not pass \(0\): none'
+            $noneRan.result.rationale | Should -Match 'Could not be assessed \(6\): '
+            $noneRan.result.outcome | Should -Be 'Unknown'
+            $noneRan.result.sufficiency | Should -Be 'HardFail'
+
+            $mixed.result.rationale | Should -Match 'Measured and passed \(3\): '
+            $mixed.result.rationale | Should -Match 'Measured and did not pass \(1\): DEP\.TGT-01 .*mbx01 lacks a prerequisite \(test\)'
+            $mixed.result.rationale | Should -Match 'Could not be assessed \(2\): '
+            $mixed.result.rationale | Should -Match 'DEP\.NET-01 \([^)]*\) - ran and reported Unknown: a flow timed out \(test\)'
+            $mixed.result.rationale | Should -Match 'DEP\.VOL-01 \([^)]*\) - did not run'
+            # Anything not assessed makes the verdict Unknown even beside a known failure; the
+            # failure keeps the severity and stays listed.
+            $mixed.result.outcome | Should -Be 'Unknown'
+            $mixed.severity | Should -Be 'High'
+        }
+
+        It 'does not count a Compliant the upstream control marked as not fully assessed as passed' {
+            $upstream = New-TestUpstream -Override @{ 'ENV.VERS-01' = (New-TestUpstreamResult -ControlId 'ENV.VERS-01' -Outcome 'Compliant' -Sufficiency 'SoftFail' `
+                -Rationale 'Exchange preparation values could not all be read: No Exchange organisation container found in the configuration naming context (test).') }
+            $result = Invoke-TestRollup -Run (New-TestRollupRun) -Upstream $upstream
+            $row = Get-TestRollupRow -Result $result -ControlId 'ENV.VERS-01'
+            $row.Group | Should -Be 'NotAssessed'
+            $row.Cause | Should -Match "^ran and reported Compliant, but with sufficiency 'SoftFail'"
+            $result.findings[0].result.outcome | Should -Be 'Unknown'
+            @($result.findings[0].result.metrics.passed) | Should -Not -Contain 'ENV.VERS-01'
+        }
+
+        It 'reports Info severity with the P13 instructions when no deployment config was supplied, as every DEP.* control does' {
+            $template = & (Get-Module $script:ModuleName) { Get-ExchDeploymentTemplatePath }
+            $upstream = @{}
+            foreach ($id in $script:DeclaredRollupPopulation) { $upstream[$id] = New-TestUpstreamResult -ControlId $id -Outcome 'Unknown' -Sufficiency 'HardFail' -Rationale "$id reported that nothing was supplied (test)." }
+            $finding = (Invoke-TestRollup -Run (New-TestRollupRun -NoDeployment) -Upstream $upstream).findings[0]
+            $finding.result.outcome | Should -Be 'Unknown'
+            $finding.severity | Should -Be 'Info'
+            $finding.result.rationale | Should -Match 'No deployment config was supplied'
+            $finding.result.rationale.Contains($template) | Should -BeTrue
+            $finding.result.rationale.Contains('New-ExchDeploymentConfig -Path .\Deployment.psd1') | Should -BeTrue
+            $finding.result.rationale.Contains('-ConfigPath .\Deployment.psd1') | Should -BeTrue
+        }
+    }
+
     Context 'Static analysis' {
 
         It 'reports no PSScriptAnalyzer findings for the repository' {

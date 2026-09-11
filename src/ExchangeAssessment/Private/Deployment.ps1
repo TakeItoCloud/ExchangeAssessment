@@ -9,8 +9,9 @@ Config/Deployment.template.psd1, and ride on the run's merged configuration.
 What lives here is the contract itself - its keys, where the template is, what a given
 configuration is missing, and the instructions for supplying it - so the preflight check and the
 DEP.* collectors say, by name and in the same words, what the operator has not supplied.
-DEP.TGT-01 and DEP.NET-01 read TargetServers, DEP.WIT-01 reads WitnessServer, and DEP.NAME-01
-reads TargetServers, WitnessServer, DagName and InternalNames.
+DEP.TGT-01 and DEP.NET-01 read TargetServers, DEP.WIT-01 reads WitnessServer, DEP.NAME-01
+reads TargetServers, WitnessServer, DagName and InternalNames, DEP.VOL-01 reads TargetServers,
+DatabaseVolume and LogVolume, and the DEP-01 roll-up asks only whether anything was supplied.
 #>
 
 Set-StrictMode -Version Latest
