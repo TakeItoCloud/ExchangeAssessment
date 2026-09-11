@@ -10,7 +10,7 @@ here plus a file under Collectors/ - nothing else changes.
   Requires  control ids whose results are passed to this collector as -Upstream
   Cloud     true when the collector needs an Exchange Online session
   SkipFlag  name of a switch on Invoke-ExchCollection that suppresses this collector
-            (SkipDomainQueries, SkipMailboxInventory, SkipDnsQueries)
+            (SkipDomainQueries, SkipMailboxInventory, SkipDnsQueries, SkipDeploymentChecks)
 #>
 
 Set-StrictMode -Version Latest
@@ -48,6 +48,7 @@ function Get-ExchCollectorRegistry {
         @{ Id='TLS-01';      Function='Invoke-ExchCollector_TLS_01_TlsConfiguration';       Area='Security';    Requires=@();                                     Cloud=$false; SkipFlag='' }
         @{ Id='PTCH-01';     Function='Invoke-ExchCollector_PTCH_01_SecurityUpdates';       Area='Security';    Requires=@('EX.CH-01');                           Cloud=$false; SkipFlag='' }
         @{ Id='DNS-01';      Function='Invoke-ExchCollector_DNS_01_MailDnsPosture';         Area='Network';     Requires=@();                                     Cloud=$false; SkipFlag='SkipDnsQueries' }
+        @{ Id='DEP.TGT-01';  Function='Invoke-ExchCollector_DEP_TGT_01_TargetServerReadiness'; Area='Deployment'; Requires=@();                                   Cloud=$false; SkipFlag='SkipDeploymentChecks' }
         @{ Id='CLD.ORG-01';  Function='Invoke-ExchCollector_CLD_ORG_01_TenantOrganization'; Area='Cloud';       Requires=@();                                     Cloud=$true;  SkipFlag='' }
         @{ Id='CLD.CONN-01'; Function='Invoke-ExchCollector_CLD_CONN_01_TenantConnector';   Area='Cloud';       Requires=@();                                     Cloud=$true;  SkipFlag='' }
         @{ Id='CLD.SEC-01';  Function='Invoke-ExchCollector_CLD_SEC_01_TenantSecurity';     Area='Cloud';       Requires=@();                                     Cloud=$true;  SkipFlag='' }

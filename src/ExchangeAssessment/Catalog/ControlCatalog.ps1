@@ -397,6 +397,21 @@ function Get-ExchControlCatalog {
             )
         }
         @{
+            controlId  = 'DEP.TGT-01'
+            domain     = 'Environment'
+            title      = 'Greenfield target server prerequisite readiness'
+            target     = 'Every member server named in Deployment.TargetServers resolves, is a domain member in the assessment''s forest, is not a domain controller or an existing Exchange server, and meets the Exchange Server SE operating system, .NET Framework, software, Windows feature, Remote Registry, disk, page file and pending-restart prerequisites.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.8.9'; note='Configuration management before deployment' }
+                @{ framework='ISO27001:2022'; ref='A.5.30'; note='ICT readiness for a platform deployment' }
+            )
+            references = @(
+                @{ title='Exchange Server 2019 and SE prerequisites'; url='https://learn.microsoft.com/exchange/plan-and-deploy/prerequisites' }
+                @{ title='Exchange Server 2019 and Subscription Edition system requirements'; url='https://learn.microsoft.com/exchange/plan-and-deploy/system-requirements' }
+                @{ title='Exchange Server supportability matrix'; url='https://learn.microsoft.com/exchange/plan-and-deploy/supportability-matrix' }
+            )
+        }
+        @{
             controlId  = 'CLD.ORG-01'
             domain     = 'Cloud'
             title      = 'Exchange Online organisation configuration'

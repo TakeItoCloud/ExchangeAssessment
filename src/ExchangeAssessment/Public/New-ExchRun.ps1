@@ -16,6 +16,9 @@ function New-ExchRun {
         # A .psd1 replacing Config/BuildTable.psd1 for this run, so a newer copy of Microsoft's
         # build list can be used without editing the module.
         [Parameter()][string]$BuildTablePath,
+        # A .psd1 replacing Config/PrereqTable.psd1 for this run, so a newer reading of the
+        # Exchange Server SE prerequisites can be used without editing the module.
+        [Parameter()][string]$PrereqTablePath,
         # Emit every inventory row into assessment.json instead of summarising the sections
         # whose size scales with the organisation.
         [Parameter()][switch]$FullInventory,
@@ -48,6 +51,10 @@ function New-ExchRun {
         throw "BuildTablePath not found: $BuildTablePath"
     }
 
+    if ($PrereqTablePath -and -not (Test-Path -LiteralPath $PrereqTablePath)) {
+        throw "PrereqTablePath not found: $PrereqTablePath"
+    }
+
     Start-Transcript -Path $transcriptPath -Force | Out-Null
 
     Write-ExchLog -Level 'INFO' -Message 'Run created' -Data @{
@@ -56,6 +63,7 @@ function New-ExchRun {
         runFolder  = $runFolder
         configPath = if ($ConfigPath) { $ConfigPath } else { 'default' }
         buildTablePath = if ($BuildTablePath) { $BuildTablePath } else { 'default' }
+        prereqTablePath = if ($PrereqTablePath) { $PrereqTablePath } else { 'default' }
     } -LogPath $logPath
 
     [pscustomobject]@{
@@ -69,6 +77,7 @@ function New-ExchRun {
         Config         = $config
         ConfigPath     = $ConfigPath
         BuildTablePath = $BuildTablePath
+        PrereqTablePath = $PrereqTablePath
         # Every failure recorded by Write-ExchError lands here as well as in the log, so the
         # report can say what could not be read rather than quietly omitting it.
         Errors         = (New-Object System.Collections.Generic.List[object])
