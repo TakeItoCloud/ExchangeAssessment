@@ -7,6 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-09-11 (phases P14.3 and P14.4, `DEP.WIT-01` and `DEP.NAME-01`)
+
+Two more greenfield deployment controls: the prerequisites of the file share witness, and whether
+the planned names are free. Neither can be discovered - the witness serves a DAG that does not
+exist yet, and the names are a plan - so both read the P13 `Deployment` section and nothing else.
+
+- **`Collectors/DEP.WIT-01.WitnessReadiness.ps1`**, registered as `DEP.WIT-01`, area `Deployment`,
+  no `Requires`, `Cloud = $false`, skip flag `SkipDeploymentChecks` - the existing switch. Its catalog
+  domain is `Environment`, as `DEP.TGT-01`'s and `DEP.NET-01`'s are, so the `ControlDomain`
+  ValidateSet is unchanged. The server comes from `Deployment.WitnessServer` only. **With it empty -
+  the shipped template's state - the control reports one `Unknown` finding, severity Info, naming the
+  template and both P13 commands, and contacts nothing; it is not an error.** Otherwise thirteen
+  checks: the name resolves; CIM and WinRM answer (which says the reads ran, not that anything is
+  met); domain member; same forest as the assessment host; a server edition at version 6.0 or later;
+  not a domain controller; not already an Exchange server; not one of `TargetServers`, by name or by
+  resolved address; `FS-FileServer` installed; the File and Printer Sharing and WMI firewall
+  exceptions on every network profile in use; the Exchange Trusted Subsystem grant; and, when the
+  optional `Deployment.WitnessDirectory` is supplied, a local non-root full path.
+- **The Trusted Subsystem grant has three states, never two.** The group is not in the directory yet
+  - `Unknown`, with the cause that `/PrepareAD` creates it and the grant becomes checkable after it
+  has run; the group exists and is not a direct member of the witness's local Administrators group -
+  `NonCompliant`; it is a member - `Compliant`. Membership is compared by SID, read with the WinNT
+  provider from the Administrators group found by its well-known SID. A directory that cannot be
+  searched is `Unknown` with that cause, and is never reported as state (a).
+- **A domain-controller witness is a finding** carrying Learn's consequence: the group then has to be
+  added to `Builtin\Administrators`, which Learn calls "an unnecessary elevation of privileges" and
+  "not a recommended configuration". **An Exchange-server witness is reported, not failed**
+  (`PartiallyCompliant`): Learn recommends an Exchange server with Client Access services as witness.
+- **`Collectors/DEP.NAME-01.NameAvailability.ps1`**, registered as `DEP.NAME-01` on the same terms.
+  With none of the four keys supplied it reports one `Unknown` finding carrying the P13 strings and
+  contacts nothing; with some supplied it checks those and names the rest. The DAG name: at most 15
+  characters, a valid computer name, held by no computer object in the forest and no planned server,
+  and by no object under `CN=Microsoft Exchange` in the configuration partition. Target and witness
+  names: free when no computer object holds the name, or exactly one does whose `dNSHostName` is the
+  supplied name - the server's own account; another holder or a duplicate is a finding. Internal
+  names: must not exist in DNS; one that resolves, or exists holding other record types, is reported
+  with its records and not judged a failure. **Every rationale says what the instruments cannot
+  see** - the one global catalog and the assessment host's resolvers that were asked - so an absence
+  is never read as proof that a name is free.
+- **`WitnessPrerequisites` and `PlannedNames`** in `Config/Thresholds.psd1`: nine values, each with
+  its Learn URL, read date and the text it came from. The two firewall rule-group ids
+  (`@FirewallAPI.dll,-28502`, `@FirewallAPI.dll,-34251`) are not on Learn; they were measured on the
+  dev VM's Windows 11 and say so in a `Measured` field.
+- **Shared code.** `Private/Deployment.ps1` gains `Get-ExchDeploymentSupplyInstruction`,
+  `Get-ExchDeploymentValue` and `Get-ExchDeploymentWitnessServer`; `DEP.TGT-01`'s "none supplied"
+  rationale now ends with the shared instruction, and its text is unchanged byte for byte (SHA256
+  `D502A221…5E95` before and after). `Get-ExchTargetState` takes `-CimQuery`, `-RemoteReader` and
+  `-RemoteArgumentList`, and the per-mechanism gate moved out of `Invoke-ExchPrereqCheck` into
+  `Get-ExchTargetMechanismGate`, so `DEP.WIT-01` reads a server and degrades exactly as `DEP.TGT-01`
+  does. The `DEP.TGT-01` tests are unchanged and pass.
+
+**Read on Microsoft Learn, 2026-09-11.** The witness requirements are manage-dags ("can't be a member
+of the DAG", "must be in the same Active Directory forest", "Windows Server 2008 or later", the File
+and Printer Sharing exception, and firewall exceptions "configured for WMI"), with Windows Server 2008
+as 6.0 in the operating system version table. The group's spelling differs by page: create-dags,
+manage-dags, New-DatabaseAvailabilityGroup and ad-changes (which lists it among the groups `/PrepareAD`
+creates) say **Exchange Trusted Subsystem**; the Azure witness page says **Exchange Trusted
+Subsystems**. The value used is the singular. The DAG name rule is manage-dags ("no longer than 15
+characters that's unique within the Active Directory forest") and New-DatabaseAvailabilityGroup ("a
+valid computer name"), with the character rules from the Active Directory naming conventions article.
+The schema pages name the DAG class `Exch-MDB-Availability-Group` but not its LDAP name, so the
+configuration search is by name, not class.
+
+**Decided by the operator, 2026-09-11.** The phase asked for an existing computer object on a target
+or witness name to be reported as in use. Every correctly joined target holds its own computer
+account, so read literally that would fire on every prepared deployment. The rule above - the
+server's own account is expected, anything else is reported - is the operator's choice.
+
+**Changed.** `ModuleVersion` is **0.5.0**: the set of controls changed, which the PORT-PLAN rule
+treats as a changed finding. With no deployment config every run now carries two more findings -
+`DEP.WIT-01` and `DEP.NAME-01`, `Unknown`, severity Info - which say none was supplied.
+
+**Tests** — twenty-six added (90 to 116), all against mocks and TestDrive. For each control: the
+registry row is well formed, resolves, reuses the one switch and the `DEP.TGT-01` category, and with
+nothing supplied there is exactly one `Unknown` finding carrying the template path and both commands
+and nothing is contacted - for `DEP.WIT-01` asserted against the shipped template's empty
+`WitnessServer`. For `DEP.WIT-01`: Trusted Subsystem states (a), (b) and (c) each asserted on its own
+and then as three distinct outcomes, with an unreadable directory a fourth cause; a domain-controller
+witness; a witness that resolves and does not answer told apart from one that does not resolve;
+per-mechanism degradation both ways; all 13 checks, counted from the collector's text; a witness that
+is a target by name and by address; an Exchange-server witness; firewall judgement per profile; the
+witness directory rule; and a Learn URL and read date on every value. For `DEP.NAME-01`: a DAG name
+held by a computer object; an internal name that already resolves; own account versus another holder
+and a duplicate; all 7 declared checks - 1 per target, 1 for the witness, 4 for the DAG name, 1 per
+internal name - against an expected row count; the scope sentence present when everything is free;
+invalid DAG names; an Exchange configuration object and an unprepared directory; an unreadable
+directory costing only the directory checks; and partly supplied keys.
+
+**Falsification.** With the suite green, five mutations, each restored from a copy and proven
+identical by SHA256: collapsing Trusted Subsystem state (a) into (b) failed 2 tests; reporting an
+existing DAG name as free failed 1; passing a domain-controller witness failed 1; dropping
+`FirewallWmi` from the witness population failed 3; dropping `ExistingExchangeObject` from the name
+evaluation failed 4. Both contexts re-ran 26 passed, 0 failed.
+
+**Verified on the dev VM only.** The witness reader scriptblock was run directly on the dev VM under
+PowerShell 7.6.6 and Windows PowerShell 5.1.26100: it read three firewall profiles, the network
+categories, 32 File and Printer Sharing rules and 8 WMI rules, and two local Administrators members
+each with a SID, and reported `Get-WindowsFeature` - absent on Windows 11 - as an error on its own
+item without losing the others. Under Windows PowerShell 5.1, where the Pester suite cannot run, the
+new code was also executed directly: both collectors returned their one `Unknown`/Info finding with
+nothing supplied, the witness directory rule accepted a folder and refused a drive root, the LDAP
+escape and the extracted mechanism gate returned what the mocks assume. **Not verified against a
+real witness, directory or DNS** - that is P14.9 and P14.10, owned by the operator.
+
 ### Added — 2026-09-11 (phase P14.2, `DEP.NET-01`)
 
 The second greenfield deployment control: network reachability, probed from each target server

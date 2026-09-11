@@ -6,12 +6,13 @@ ExchangeAssessment reads an on-premises or hybrid Exchange organisation and repo
 the **configuration** it found, and the **problems** in that configuration. It is read-only —
 every collector reads, and the only writes are into the local run folder.
 
-A run drives 34 collectors across the whole organisation - servers, Active Directory, Exchange
+A run drives 36 collectors across the whole organisation - servers, Active Directory, Exchange
 version and patch state, databases, DAG and replication, transport configuration, connectors and
 queues, certificates, TLS, anti-malware, RBAC, mailboxes, retention and audit, client access,
-public folders, address lists, hybrid, identity sync, DNS posture and event logs, and the
-prerequisites and network reachability of the member servers named for a greenfield deployment -
-plus, on request, the Exchange Online side of a hybrid organisation. It then writes:
+public folders, address lists, hybrid, identity sync, DNS posture and event logs, and for a
+greenfield deployment the prerequisites and network reachability of the member servers named for
+it, the prerequisites of its file share witness, and whether its planned names are free - plus, on
+request, the Exchange Online side of a hybrid organisation. It then writes:
 
 - **`csv/`** — one CSV per configuration area, plus `csv/findings.csv`. The complete record.
 - **`assessment.json`** — the whole assessment in one file: configuration inventory, findings
@@ -56,6 +57,8 @@ Extracted from `infra-scripting-suite/powershell/Assessments/ExchangeAssessment`
 | `DNS-01` | MX, SPF and DMARC for every authoritative accepted domain |
 | `DEP.TGT-01` | Greenfield deployment: Exchange Server SE prerequisites on the member servers named in `Deployment.TargetServers` - see *Planning a new deployment* |
 | `DEP.NET-01` | Greenfield deployment: network reachability probed **from** each server in `Deployment.TargetServers` to the domain controllers, the witness, the other targets and its DNS servers - see *Planning a new deployment* |
+| `DEP.WIT-01` | Greenfield deployment: the server in `Deployment.WitnessServer` against the file share witness prerequisites Microsoft Learn states - see *Planning a new deployment* |
+| `DEP.NAME-01` | Greenfield deployment: whether the planned DAG name, server names and internal names are free - see *Planning a new deployment* |
 
 Four more run only with `-IncludeExchangeOnline`:
 
@@ -99,7 +102,7 @@ View-Only Organization Management in Exchange plus domain read covers most colle
 event log and anti-malware exclusion collectors need local administrative rights on the
 Exchange servers.
 
-Four controls need a little more, and say so in their output rather than failing:
+Six controls need a little more, and say so in their output rather than failing:
 
 - **`TR.CO-01`** runs `Get-ADPermission` against each receive connector to find out whether an
   anonymous principal actually holds `ms-Exch-SMTP-Accept-Any-Recipient` — the permission that
@@ -121,6 +124,13 @@ Four controls need a little more, and say so in their output rather than failing
   different question. The WMI flow to the witness runs inside that WinRM session, where the
   operator's credentials do not pass on to a third host without delegation, so an access-denied
   there is about authentication rather than the network; the flow stays `Unknown` either way.
+- **`DEP.WIT-01`** reads the server named in `Deployment.WitnessServer` over CIM and WinRM, as
+  `DEP.TGT-01` reads a target, and searches a global catalog for the Exchange Trusted Subsystem
+  group. Reading the witness's local Administrators group and firewall rules needs local
+  administrative rights on it. A mechanism it cannot use makes the checks that need it `Unknown`.
+- **`DEP.NAME-01`** searches a global catalog of the forest for computer objects, reads the
+  `CN=Microsoft Exchange,CN=Services` container of the configuration partition, and resolves the
+  planned internal names with the assessment host's own DNS servers. Domain read covers it.
 
 ## Install
 
@@ -313,8 +323,32 @@ empty the witness flows are `Unknown` naming the key, and every other flow still
 `Unknown`, never `Closed`, and a `Closed` flow is reported rather than judged - before Exchange is
 installed nothing listens on a peer's replication port, so a refusal there is expected.
 
-The other greenfield controls - witness, planned names, database and log volumes, and the roll-up -
-are [PORT-PLAN.md](PORT-PLAN.md) phase P14. A filled copy holds client host names, so keep it out
+`DEP.WIT-01` checks the server in `WitnessServer` against what Microsoft Learn states a file share
+witness needs: it resolves and answers, it is a domain member in the assessment's forest, it runs
+Windows Server 2008 or later, it is not a domain controller and not one of the target servers, it
+has the File Server role and the File and Printer Sharing and WMI firewall exceptions, and the
+Exchange Trusted Subsystem group is in its local Administrators group. That grant has three states,
+never two: before Active Directory is prepared for Exchange the group does not exist yet, and the
+check is `Unknown` saying so - it becomes checkable once `/PrepareAD` has run. An optional
+`WitnessDirectory` key in the `Deployment` section is checked as a local, non-root path. With
+`WitnessServer` empty - the state of the shipped template - the control reports one `Unknown`
+finding and contacts nothing.
+
+`DEP.NAME-01` checks that the planned names are free. The DAG name must be a valid computer name of
+at most 15 characters that no computer object in the forest and no Exchange configuration object
+holds. A target or witness that is already a domain member holds its own computer account, so a
+server name is free when nothing holds it or exactly one computer object does whose DNS host name is
+the supplied name; any other holder is reported. Each internal name must not exist in DNS. A name in
+use is a finding that names what holds it. Every rationale states what the lookups cannot see - an
+object in another forest or not yet replicated to the global catalog searched, a record in another
+DNS view - so an absence is never read as proof that a name is free.
+
+The witness and planned-name rules live in `Config/Thresholds.psd1` under `WitnessPrerequisites`
+and `PlannedNames`, each value with the Learn page it was read from and the date; the two firewall
+rule-group ids say they were measured on the dev VM rather than read on Learn.
+
+The remaining greenfield controls - database and log volumes and the roll-up - are
+[PORT-PLAN.md](PORT-PLAN.md) phase P14. A filled copy holds client host names, so keep it out
 of source control. `Deployment.psd1` is gitignored in this repository for that reason.
 
 ### Keeping the port matrix current

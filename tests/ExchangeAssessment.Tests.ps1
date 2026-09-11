@@ -1820,6 +1820,598 @@ Describe 'ExchangeAssessment' {
         }
     }
 
+    Context 'Witness readiness (DEP.WIT-01)' {
+
+        BeforeAll {
+            Import-Module -Name $script:ManifestPath -Force -ErrorAction Stop
+
+            $script:WitCollectorFile = Join-Path -Path $script:CollectorRoot -ChildPath 'DEP.WIT-01.WitnessReadiness.ps1'
+            $script:WitThresholds = & (Get-Module $script:ModuleName) { Import-ExchConfiguration }
+
+            # How many checks the collector declares, written here rather than read from the module,
+            # so a check dropped from the definitions or from the evaluation turns this context red.
+            $script:DeclaredWitnessCheckCount = 13
+
+            # A fictional SID for the Exchange Trusted Subsystem group. Every host name sits under the
+            # reserved .test top-level domain (RFC 2606) and every address in TEST-NET-1 (RFC 5737).
+            $script:TestEtsSid = 'S-1-5-21-1111111111-2222222222-3333333333-1117'
+
+            function New-TestWitRun {
+                param([string]$Witness = 'fsw01.example.test', [object[]]$Targets = @('mbx01.example.test', 'mbx02.example.test'), [string]$Directory = '', [switch]$NoDeployment)
+                $folder = Join-Path -Path $TestDrive -ChildPath ('run-' + [guid]::NewGuid())
+                New-Item -ItemType Directory -Path (Join-Path -Path $folder -ChildPath 'evidence') -Force | Out-Null
+                $config = @{}
+                foreach ($key in $script:WitThresholds.Keys) { $config[$key] = $script:WitThresholds[$key] }
+                if (-not $NoDeployment) {
+                    $config['Deployment'] = @{ TargetServers = $Targets; WitnessServer = $Witness }
+                    if ($Directory) { $config['Deployment']['WitnessDirectory'] = $Directory }
+                }
+                [pscustomobject]@{
+                    RunId = 'test'; TenantHint = 'test'; RunFolder = $folder
+                    LogPath = (Join-Path -Path $folder -ChildPath 'run.jsonl'); ConfigPath = ''
+                    Config = $config; Flags = @{}
+                    Errors = (New-Object System.Collections.Generic.List[object])
+                }
+            }
+
+            # What a witness that meets every prerequisite returns over CIM: a member server, Windows
+            # Server build 20348, in the assessment's forest, running no Exchange service.
+            function Get-TestWitCim {
+                param([string]$ClassName)
+                if ($script:WitScenario.Cim -and $script:WitScenario.Cim.ContainsKey($ClassName)) { return $script:WitScenario.Cim[$ClassName] }
+                switch ($ClassName) {
+                    'Win32_OperatingSystem' { [pscustomobject]@{ Caption = 'Test Server OS'; Version = '10.0.20348'; ProductType = 3; LastBootUpTime = [datetime]'2026-09-01' } }
+                    'Win32_ComputerSystem'  { [pscustomobject]@{ PartOfDomain = $true; Domain = 'corp.example.test'; DomainRole = 3 } }
+                    'Win32_NTDomain'        { [pscustomobject]@{ DomainName = 'CORP'; DNSForestName = 'example.test' } }
+                    'Win32_Service'         { @() }
+                    default                 { throw "Unexpected CIM class in test: $ClassName" }
+                }
+            }
+
+            # ...and over WinRM: the File Server role installed, the firewall on for the domain profile
+            # with both groups' inbound rules enabled, and the group in the local Administrators group.
+            function New-TestWitReading {
+                $admins = @([pscustomobject]@{ Sid = 'S-1-5-21-1000000000-2000000000-3000000000-500'; Path = 'WinNT://FSW01/Administrator' })
+                if (-not $script:WitScenario.ContainsKey('EtsMember') -or $script:WitScenario.EtsMember) {
+                    $admins += [pscustomobject]@{ Sid = $script:TestEtsSid; Path = 'WinNT://EXAMPLE/Exchange Trusted Subsystem' }
+                }
+                $reading = [pscustomobject]@{
+                    FileServer          = [pscustomobject]@{ Name = 'FS-FileServer'; InstallState = 'Installed' }
+                    FirewallProfiles    = @(
+                        [pscustomobject]@{ Name = 'Domain'; Enabled = 'True' }
+                        [pscustomobject]@{ Name = 'Private'; Enabled = 'True' }
+                        [pscustomobject]@{ Name = 'Public'; Enabled = 'True' }
+                    )
+                    NetworkCategories   = @('DomainAuthenticated')
+                    FirewallFileSharing = @([pscustomobject]@{ DisplayName = 'File and Printer Sharing (SMB-In)'; Enabled = 'True'; Direction = 'Inbound'; Profile = 'Domain' })
+                    FirewallWmi         = @([pscustomobject]@{ DisplayName = 'Windows Management Instrumentation (WMI-In)'; Enabled = 'True'; Direction = 'Inbound'; Profile = 'Domain' })
+                    Administrators      = $admins
+                    Errors              = @{}
+                }
+                if ($script:WitScenario.ContainsKey('Reading')) { & $script:WitScenario.Reading $reading }
+                $reading
+            }
+
+            function Invoke-TestWit {
+                param($Run)
+                & (Get-Module $script:ModuleName) { param($r) Invoke-ExchCollector_DEP_WIT_01_WitnessReadiness -Run $r } $Run
+            }
+
+            function Get-TestWitRow {
+                param($Result, [string]$Check)
+                @($Result.findings[0].result.metrics.checks | Where-Object { $_.Check -eq $Check })[0]
+            }
+
+            $script:WitScenario = @{}
+
+            # Every remote and directory call is mocked: the name, CIM, WinRM, the assessment host's
+            # forest and the directory search for the group.
+            Mock -ModuleName $script:ModuleName Resolve-ExchTargetName {
+                if (@($script:WitScenario.Unresolvable) -contains $Name) { return [pscustomobject]@{ Resolved = $false; Addresses = @(); Error = 'No such host is known (test)' } }
+                $address = switch -Wildcard ($Name) { 'fsw01*' { '192.0.2.30' } 'mbx01*' { '192.0.2.11' } 'mbx02*' { '192.0.2.12' } default { '192.0.2.99' } }
+                if ($script:WitScenario.Addresses -and $script:WitScenario.Addresses.ContainsKey($Name)) { $address = $script:WitScenario.Addresses[$Name] }
+                [pscustomobject]@{ Resolved = $true; Addresses = @($address); Error = '' }
+            }
+            Mock -ModuleName $script:ModuleName Get-ExchTargetCimInstance {
+                if (@($script:WitScenario.CimDown) -contains $ComputerName) { throw "CIM connection to $ComputerName refused (test)" }
+                Get-TestWitCim -ClassName $ClassName
+            }
+            Mock -ModuleName $script:ModuleName Invoke-ExchTargetCommand {
+                if (@($script:WitScenario.WinRmDown) -contains $ComputerName) { throw "WinRM connection to $ComputerName refused (test)" }
+                New-TestWitReading
+            }
+            Mock -ModuleName $script:ModuleName Get-ExchRunForestName { 'example.test' }
+            Mock -ModuleName $script:ModuleName Find-ExchDirectoryGroup {
+                $scope = 'the global catalog gc01.example.test:3268 (test)'
+                if ($script:WitScenario.Group -eq 'Throw') { throw 'the directory could not be read (test)' }
+                if ($script:WitScenario.Group -eq 'Missing') { return [pscustomobject]@{ Scope = $scope; Groups = @() } }
+                [pscustomobject]@{ Scope = $scope; Groups = @([pscustomobject]@{
+                    Name = 'Exchange Trusted Subsystem'; Sid = $script:TestEtsSid
+                    DistinguishedName = 'CN=Exchange Trusted Subsystem,OU=Microsoft Exchange Security Groups,DC=example,DC=test'
+                }) }
+            }
+        }
+
+        BeforeEach { $script:WitScenario = @{} }
+
+        It 'registers DEP.WIT-01 as a well-formed row whose function resolves, under the existing switch and category' {
+            $registry = & (Get-Module $script:ModuleName) { Get-ExchCollectorRegistry }
+            $rows = @($registry | Where-Object { $_.Id -eq 'DEP.WIT-01' })
+            $rows.Count | Should -Be 1
+
+            $row = $rows[0]
+            $row.Function | Should -Be 'Invoke-ExchCollector_DEP_WIT_01_WitnessReadiness'
+            $row.Area | Should -Be 'Deployment'
+            @($row.Requires).Count | Should -Be 0
+            $row.Cloud | Should -BeFalse
+            $row.SkipFlag | Should -Be 'SkipDeploymentChecks'
+
+            $command = & (Get-Module $script:ModuleName) { param($n) Get-Command -Name $n -CommandType Function -ErrorAction SilentlyContinue } $row.Function
+            $command | Should -Not -BeNullOrEmpty
+            $command.Parameters.Keys | Should -Contain 'Run'
+
+            $switches = @((Get-Command -Name 'Invoke-ExchCollection' -Module $script:ModuleName).Parameters.Keys | Where-Object { $_ -like '*Deployment*' })
+            @($switches) | Should -Be @('SkipDeploymentChecks') -Because 'the existing switch is reused, not a second one added'
+            (& (Get-Module $script:ModuleName) { Get-ExchControlById -ControlId 'DEP.WIT-01' }).domain |
+                Should -Be (& (Get-Module $script:ModuleName) { Get-ExchControlById -ControlId 'DEP.TGT-01' }).domain
+        }
+
+        It 'reports exactly one Unknown finding carrying the three P13 strings when Deployment.WitnessServer is empty - the expected state today - and contacts nothing' {
+            # The shipped template carries an empty WitnessServer, so this is the path a run takes today.
+            (Import-PowerShellDataFile -Path (Join-Path -Path $script:ToolRoot -ChildPath 'Config/Deployment.template.psd1')).Deployment.WitnessServer | Should -Be ''
+            $template = & (Get-Module $script:ModuleName) { Get-ExchDeploymentTemplatePath }
+
+            foreach ($run in @((New-TestWitRun -NoDeployment), (New-TestWitRun -Witness ''), (New-TestWitRun -Witness '   '))) {
+                $result = Invoke-TestWit -Run $run
+                @($result.findings).Count | Should -Be 1
+                @($result.sections).Count | Should -Be 0
+                $finding = $result.findings[0]
+                $finding.controlId | Should -Be 'DEP.WIT-01'
+                $finding.result.outcome | Should -Be 'Unknown'
+                $finding.severity | Should -Be 'Info'
+                $rationale = $finding.result.rationale
+                $rationale.Contains($template) | Should -BeTrue -Because "the rationale must carry the template path $template"
+                $rationale.Contains('New-ExchDeploymentConfig -Path .\Deployment.psd1') | Should -BeTrue
+                $rationale.Contains('-ConfigPath .\Deployment.psd1') | Should -BeTrue
+                $rationale | Should -Match 'expected state'
+                $rationale | Should -Match 'not an error'
+            }
+
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Resolve-ExchTargetName -Times 0 -Exactly
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Get-ExchTargetCimInstance -Times 0 -Exactly
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Invoke-ExchTargetCommand -Times 0 -Exactly
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Find-ExchDirectoryGroup -Times 0 -Exactly
+        }
+
+        It 'reports Trusted Subsystem state (a), the group not yet in the directory, as Unknown with the /PrepareAD cause - never as a failure' {
+            $script:WitScenario = @{ Group = 'Missing' }
+            $result = Invoke-TestWit -Run (New-TestWitRun)
+            $row = Get-TestWitRow -Result $result -Check 'TrustedSubsystemGrant'
+
+            $row.Outcome | Should -Be 'Unknown'
+            $row.Measured | Should -Match '^state \(a\)'
+            $row.Cause | Should -Match 'does not exist in the directory yet'
+            $row.Cause | Should -Match '/PrepareAD'
+            $row.Cause | Should -Match 'expected before Active Directory has been prepared'
+            $row.Cause | Should -Match 'becomes checkable'
+            $result.findings[0].result.metrics.trustedSubsystemState | Should -Be 'NotFound'
+            $result.findings[0].result.outcome | Should -Be 'Unknown' -Because 'every other check passes, and a group that does not exist yet is not a failed prerequisite'
+        }
+
+        It 'reports Trusted Subsystem state (b), the group present but not a local Administrator, as NonCompliant' {
+            $script:WitScenario = @{ EtsMember = $false }
+            $result = Invoke-TestWit -Run (New-TestWitRun)
+            $row = Get-TestWitRow -Result $result -Check 'TrustedSubsystemGrant'
+
+            $row.Outcome | Should -Be 'NonCompliant'
+            $row.Measured | Should -Match '^state \(b\)'
+            $row.Measured | Should -Match ([regex]::Escape($script:TestEtsSid))
+            $row.Cause | Should -Match 'nested group was not evaluated'
+            $result.findings[0].result.metrics.trustedSubsystemState | Should -Be 'Found'
+            $result.findings[0].result.outcome | Should -Be 'NonCompliant'
+        }
+
+        It 'reports Trusted Subsystem state (c), the group present and a local Administrator, as Compliant' {
+            $result = Invoke-TestWit -Run (New-TestWitRun)
+            $row = Get-TestWitRow -Result $result -Check 'TrustedSubsystemGrant'
+
+            $row.Outcome | Should -Be 'Compliant'
+            $row.Measured | Should -Match '^state \(c\)'
+            $row.MechanismState | Should -Be 'Directory:Read WinRM:Read'
+        }
+
+        It 'gives the three Trusted Subsystem states three distinct outcomes, and a directory it cannot read a fourth cause, not one of them' {
+            $outcomes = foreach ($scenario in @(@{ Group = 'Missing' }, @{ EtsMember = $false }, @{})) {
+                $script:WitScenario = $scenario
+                (Get-TestWitRow -Result (Invoke-TestWit -Run (New-TestWitRun)) -Check 'TrustedSubsystemGrant').Outcome
+            }
+            @($outcomes | Sort-Object -Unique).Count | Should -Be 3
+
+            $script:WitScenario = @{ Group = 'Throw' }
+            $row = Get-TestWitRow -Result (Invoke-TestWit -Run (New-TestWitRun)) -Check 'TrustedSubsystemGrant'
+            $row.Outcome | Should -Be 'Unknown'
+            $row.Cause | Should -Match 'could not be searched'
+            $row.Measured | Should -Not -Match 'state \(a\)' -Because 'an unread directory is not evidence that the group is missing'
+        }
+
+        It 'reports a witness that is a domain controller as a finding, carrying the consequence Learn states' {
+            $script:WitScenario = @{ Cim = @{ 'Win32_ComputerSystem' = [pscustomobject]@{ PartOfDomain = $true; Domain = 'corp.example.test'; DomainRole = 5 } } }
+            $result = Invoke-TestWit -Run (New-TestWitRun -Witness 'dc01.example.test')
+            $row = Get-TestWitRow -Result $result -Check 'NotDomainController'
+
+            $row.Outcome | Should -Be 'NonCompliant'
+            $row.Measured | Should -Be 'DomainRole 5'
+            $row.Cause | Should -Match 'Builtin\\Administrators'
+            $row.Cause | Should -Match 'unnecessary elevation of privileges'
+            $result.findings[0].result.outcome | Should -Be 'NonCompliant'
+            $result.findings[0].result.metrics.server.IsDomainController | Should -Be 'True'
+        }
+
+        It 'tells a witness that resolves but does not answer from one whose name does not resolve' {
+            $script:WitScenario = @{ Unresolvable = @('typo01.example.test') }
+            $typo = Invoke-TestWit -Run (New-TestWitRun -Witness 'typo01.example.test')
+            $script:WitScenario = @{ CimDown = @('fsw01.example.test'); WinRmDown = @('fsw01.example.test') }
+            $down = Invoke-TestWit -Run (New-TestWitRun)
+
+            $typo.findings[0].result.metrics.status | Should -Be 'NameDoesNotResolve'
+            $typo.findings[0].result.metrics.server.CimState | Should -Be 'NotAttempted'
+            $typo.findings[0].result.rationale | Should -Match 'does not resolve on the assessment host'
+            $typo.findings[0].result.rationale | Should -Not -Match 'answered neither'
+            (Get-TestWitRow -Result $typo -Check 'NameResolves').Outcome | Should -Be 'Unknown'
+
+            $down.findings[0].result.metrics.status | Should -Be 'Unreachable'
+            $down.findings[0].result.metrics.server.Resolves | Should -Be 'True'
+            $down.findings[0].result.rationale | Should -Match 'resolves \(192\.0\.2\.30\) but answered neither CIM nor WinRM'
+            (Get-TestWitRow -Result $down -Check 'NameResolves').Outcome | Should -Be 'Compliant'
+            $reachable = Get-TestWitRow -Result $down -Check 'Reachable'
+            $reachable.Outcome | Should -Be 'Unknown'
+            $reachable.Cause | Should -Match 'CIM: .*refused \(test\).*WinRM: .*refused \(test\)'
+
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Get-ExchTargetCimInstance -Times 0 -Exactly -ParameterFilter { $ComputerName -eq 'typo01.example.test' }
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Invoke-ExchTargetCommand -Times 0 -Exactly -ParameterFilter { $ComputerName -eq 'typo01.example.test' }
+        }
+
+        It 'degrades per mechanism: CIM checks stand when WinRM fails, and WinRM checks stand when CIM fails' {
+            $cimChecks = @('DomainMember', 'SameForest', 'OperatingSystem', 'NotDomainController', 'NotExchangeServer')
+            $winRmChecks = @('FileServerRole', 'FirewallFileAndPrinterSharing', 'FirewallWmi')
+
+            $script:WitScenario = @{ WinRmDown = @('fsw01.example.test') }
+            $result = Invoke-TestWit -Run (New-TestWitRun)
+            foreach ($check in $cimChecks) { (Get-TestWitRow -Result $result -Check $check).Outcome | Should -Be 'Compliant' -Because "$check reads only CIM, which answered" }
+            foreach ($check in $winRmChecks) {
+                $row = Get-TestWitRow -Result $result -Check $check
+                $row.Outcome | Should -Be 'Unknown'
+                $row.Cause | Should -Match '^Not read: WinRM \(Invoke-Command\) to fsw01\.example\.test failed'
+            }
+            (Get-TestWitRow -Result $result -Check 'TrustedSubsystemGrant').Cause | Should -Match 'Administrators group was not read'
+
+            $script:WitScenario = @{ CimDown = @('fsw01.example.test') }
+            $result = Invoke-TestWit -Run (New-TestWitRun)
+            foreach ($check in $cimChecks) { (Get-TestWitRow -Result $result -Check $check).Cause | Should -Match '^Not read: CIM on fsw01\.example\.test' }
+            foreach ($check in $winRmChecks) { (Get-TestWitRow -Result $result -Check $check).Outcome | Should -Be 'Compliant' -Because "$check reads only WinRM, which answered" }
+            $result.findings[0].result.metrics.status | Should -Be 'PartiallyRead'
+        }
+
+        It 'evaluates all 13 declared witness checks, one row each, counted from the collector file''s text' {
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:WitCollectorFile, [ref]$null, [ref]$null)
+            $definition = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-ExchWitnessCheckDefinition' }, $true)
+            $definition | Should -Not -BeNullOrEmpty
+            $textKeys = @([regex]::Matches($definition.Extent.Text, "Key = '(?<key>\w+)'") | ForEach-Object { $_.Groups['key'].Value })
+            $textKeys.Count | Should -Be $script:DeclaredWitnessCheckCount
+
+            $result = Invoke-TestWit -Run (New-TestWitRun -Directory 'D:\DAGWitness')
+            $rows = @($result.findings[0].result.metrics.checks)
+            $rows.Count | Should -Be $script:DeclaredWitnessCheckCount
+            Compare-Object -ReferenceObject $textKeys -DifferenceObject @($rows | ForEach-Object { $_.Check }) | Should -BeNullOrEmpty
+            foreach ($row in $rows) { $row.Outcome | Should -Be 'Compliant' -Because "$($row.Check) passes on a witness that meets every prerequisite" }
+            $result.findings[0].result.outcome | Should -Be 'Compliant'
+            @($result.sections | Where-Object { $_.key -eq 'deployment.witness-checks' })[0].totalRows | Should -Be $script:DeclaredWitnessCheckCount
+        }
+
+        It 'reports a witness that is one of the target servers, by name or by address, as a DAG member' {
+            $byName = Invoke-TestWit -Run (New-TestWitRun -Witness 'mbx02.example.test')
+            (Get-TestWitRow -Result $byName -Check 'NotDagMember').Outcome | Should -Be 'NonCompliant'
+            (Get-TestWitRow -Result $byName -Check 'NotDagMember').Measured | Should -Match 'mbx02\.example\.test \(same name\)'
+
+            $script:WitScenario = @{ Addresses = @{ 'fsw01.example.test' = '192.0.2.12' } }
+            $byAddress = Invoke-TestWit -Run (New-TestWitRun)
+            $row = Get-TestWitRow -Result $byAddress -Check 'NotDagMember'
+            $row.Outcome | Should -Be 'NonCompliant'
+            $row.Measured | Should -Match 'mbx02\.example\.test \(same address 192\.0\.2\.12\)'
+            $row.Cause | Should -Match 'can''t be a member of the DAG'
+        }
+
+        It 'reports an Exchange server witness for the reader, not as a failure, because Learn recommends one' {
+            $script:WitScenario = @{ Cim = @{ 'Win32_Service' = @([pscustomobject]@{ Name = 'MSExchangeServiceHost'; StartMode = 'Auto'; State = 'Running' }) } }
+            $result = Invoke-TestWit -Run (New-TestWitRun)
+            $row = Get-TestWitRow -Result $result -Check 'NotExchangeServer'
+            $row.Outcome | Should -Be 'PartiallyCompliant'
+            $row.Cause | Should -Match 'recommends an Exchange server'
+            $result.findings[0].result.outcome | Should -Be 'PartiallyCompliant'
+        }
+
+        It 'judges the firewall exceptions per profile in use: off is met, on with the group disabled fails, no rule of the group is Unknown' {
+            $script:WitScenario = @{ Reading = { param($r) $r.FirewallProfiles = @([pscustomobject]@{ Name = 'Domain'; Enabled = 'False' }); $r.FirewallWmi = @() } }
+            $off = Invoke-TestWit -Run (New-TestWitRun)
+            (Get-TestWitRow -Result $off -Check 'FirewallWmi').Outcome | Should -Be 'Compliant'
+            (Get-TestWitRow -Result $off -Check 'FirewallWmi').Measured | Should -Be 'Domain: Windows Firewall off'
+
+            $script:WitScenario = @{ Reading = { param($r) $r.FirewallFileSharing[0].Enabled = 'False'; $r.FirewallWmi = @() } }
+            $on = Invoke-TestWit -Run (New-TestWitRun)
+            (Get-TestWitRow -Result $on -Check 'FirewallFileAndPrinterSharing').Outcome | Should -Be 'NonCompliant'
+            (Get-TestWitRow -Result $on -Check 'FirewallWmi').Outcome | Should -Be 'Unknown'
+            (Get-TestWitRow -Result $on -Check 'FirewallWmi').Cause | Should -Match 'may differ on the witness'
+        }
+
+        It 'checks a supplied witness directory as a local non-root full path, and reports it not applicable when none is supplied' {
+            $test = { param($p) & (Get-Module $script:ModuleName) { param($x) Test-ExchWitnessDirectoryPath -Path $x } $p }
+            (& $test 'D:\DAGWitness\DAG01').Valid | Should -BeTrue
+            (& $test 'D:\').Reason | Should -Match 'root'
+            (& $test '\\fs01.example.test\witness').Reason | Should -Match 'UNC'
+            (& $test 'DAGWitness').Reason | Should -Match 'drive letter'
+            (& $test 'D:\DAG|Witness').Valid | Should -BeFalse
+
+            $none = Get-TestWitRow -Result (Invoke-TestWit -Run (New-TestWitRun)) -Check 'WitnessDirectory'
+            $none.Outcome | Should -Be 'NotApplicable'
+            $none.Cause | Should -Match 'DAGFileShareWitnesses'
+            (Get-TestWitRow -Result (Invoke-TestWit -Run (New-TestWitRun -Directory 'D:\')) -Check 'WitnessDirectory').Outcome | Should -Be 'NonCompliant'
+        }
+
+        It 'records a Learn URL and read date for every witness and planned-name value, and says which values were measured' {
+            foreach ($section in @('WitnessPrerequisites', 'PlannedNames')) {
+                $entries = $script:WitThresholds[$section]
+                $entries.Keys.Count | Should -BeGreaterThan 0
+                foreach ($key in $entries.Keys) {
+                    $entry = $entries[$key]
+                    $entry.Contains('Value') | Should -BeTrue -Because "$section.$key must state a Value"
+                    $sources = @($entry['Source'] | Where-Object { $_ })
+                    $sources.Count | Should -BeGreaterThan 0 -Because "$section.$key must name its source"
+                    foreach ($source in $sources) { $source | Should -Match '^https://learn\.microsoft\.com/' }
+                    { [datetime]::ParseExact([string]$entry['Read'], 'yyyy-MM-dd', [cultureinfo]::InvariantCulture) } | Should -Not -Throw
+                    [string]$entry['Note'] | Should -Not -BeNullOrEmpty
+                }
+            }
+            # The firewall group ids are not on Learn; the entries say where they were measured.
+            foreach ($key in @('FileAndPrinterSharingFirewallGroup', 'WmiFirewallGroup')) {
+                [string]$script:WitThresholds.WitnessPrerequisites[$key]['Measured'] | Should -Match 'dev VM'
+            }
+        }
+    }
+
+    Context 'Name availability (DEP.NAME-01)' {
+
+        BeforeAll {
+            Import-Module -Name $script:ManifestPath -Force -ErrorAction Stop
+
+            $script:NameCollectorFile = Join-Path -Path $script:CollectorRoot -ChildPath 'DEP.NAME-01.NameAvailability.ps1'
+            $script:NameThresholds = & (Get-Module $script:ModuleName) { Import-ExchConfiguration }
+
+            # How many checks the collector declares, written here rather than read from the module.
+            $script:DeclaredNameCheckCount = 7
+
+            function New-TestNameRun {
+                param([object[]]$Targets = @('mbx01.example.test', 'mbx02.example.test'), [string]$Witness = 'fsw01.example.test',
+                    [string]$DagName = 'DAG01', [object[]]$InternalNames = @('mail.example.test', 'autodiscover.example.test'), [switch]$NoDeployment)
+                $folder = Join-Path -Path $TestDrive -ChildPath ('run-' + [guid]::NewGuid())
+                New-Item -ItemType Directory -Path (Join-Path -Path $folder -ChildPath 'evidence') -Force | Out-Null
+                $config = @{}
+                foreach ($key in $script:NameThresholds.Keys) { $config[$key] = $script:NameThresholds[$key] }
+                if (-not $NoDeployment) { $config['Deployment'] = @{ TargetServers = $Targets; WitnessServer = $Witness; DagName = $DagName; InternalNames = $InternalNames } }
+                [pscustomobject]@{
+                    RunId = 'test'; TenantHint = 'test'; RunFolder = $folder
+                    LogPath = (Join-Path -Path $folder -ChildPath 'run.jsonl'); ConfigPath = ''
+                    Config = $config; Flags = @{}
+                    Errors = (New-Object System.Collections.Generic.List[object])
+                }
+            }
+
+            function New-TestComputer {
+                param([string]$Name, [string]$DnsHostName, [string]$Ou = 'Servers')
+                [pscustomobject]@{ Name = $Name; SamAccountName = "$Name`$"; DNSHostName = $DnsHostName; DistinguishedName = "CN=$Name,OU=$Ou,DC=example,DC=test" }
+            }
+
+            function Invoke-TestName {
+                param($Run)
+                & (Get-Module $script:ModuleName) { param($r) Invoke-ExchCollector_DEP_NAME_01_NameAvailability -Run $r } $Run
+            }
+
+            function Get-TestNameRow {
+                param($Result, [string]$Role, [string]$Check, [string]$Name = '')
+                @($Result.findings[0].result.metrics.checks | Where-Object { $_.Role -eq $Role -and $_.Check -eq $Check -and (-not $Name -or $_.Name -eq $Name) })[0]
+            }
+
+            $script:NameScenario = @{}
+
+            # Every directory and DNS call is mocked. By default a server name is held by its own
+            # computer account, the DAG name by nothing, and no internal name exists in DNS.
+            Mock -ModuleName $script:ModuleName Find-ExchDirectoryComputer {
+                if ($script:NameScenario.DirectoryFails) { throw 'the directory could not be read (test)' }
+                $scope = 'the global catalog gc01.example.test:3268 (test)'
+                if ($script:NameScenario.Computers -and $script:NameScenario.Computers.ContainsKey($Name)) { return [pscustomobject]@{ Scope = $scope; Computers = @($script:NameScenario.Computers[$Name]) } }
+                if ($Fqdn) { return [pscustomobject]@{ Scope = $scope; Computers = @(New-TestComputer -Name $Name.ToUpperInvariant() -DnsHostName $Fqdn) } }
+                [pscustomobject]@{ Scope = $scope; Computers = @() }
+            }
+            Mock -ModuleName $script:ModuleName Find-ExchDirectoryExchangeObject {
+                if ($script:NameScenario.DirectoryFails) { throw 'the directory could not be read (test)' }
+                $scope = 'CN=Microsoft Exchange,CN=Services,CN=Configuration,DC=example,DC=test'
+                if ($script:NameScenario.NoExchangeOrganization) { return [pscustomobject]@{ Scope = $scope; ContainerExists = $false; Objects = @() } }
+                $objects = @()
+                if ($script:NameScenario.ExchangeObjects -and $script:NameScenario.ExchangeObjects.ContainsKey($Name)) { $objects = @($script:NameScenario.ExchangeObjects[$Name]) }
+                [pscustomobject]@{ Scope = $scope; ContainerExists = $true; Objects = $objects }
+            }
+            Mock -ModuleName $script:ModuleName Resolve-ExchPlannedDnsName {
+                if ($script:NameScenario.Dns -and $script:NameScenario.Dns.ContainsKey($Name)) { return $script:NameScenario.Dns[$Name] }
+                [pscustomobject]@{ Status = 'NameDoesNotExist'; Records = @(); Error = '' }
+            }
+        }
+
+        BeforeEach { $script:NameScenario = @{} }
+
+        It 'registers DEP.NAME-01 as a well-formed row whose function resolves, under the existing switch and category' {
+            $rows = @(& (Get-Module $script:ModuleName) { Get-ExchCollectorRegistry } | Where-Object { $_.Id -eq 'DEP.NAME-01' })
+            $rows.Count | Should -Be 1
+            $rows[0].Function | Should -Be 'Invoke-ExchCollector_DEP_NAME_01_NameAvailability'
+            $rows[0].Area | Should -Be 'Deployment'
+            @($rows[0].Requires).Count | Should -Be 0
+            $rows[0].Cloud | Should -BeFalse
+            $rows[0].SkipFlag | Should -Be 'SkipDeploymentChecks'
+            (& (Get-Module $script:ModuleName) { param($n) Get-Command -Name $n -CommandType Function -ErrorAction SilentlyContinue } $rows[0].Function).Parameters.Keys | Should -Contain 'Run'
+            (& (Get-Module $script:ModuleName) { Get-ExchControlById -ControlId 'DEP.NAME-01' }).domain |
+                Should -Be (& (Get-Module $script:ModuleName) { Get-ExchControlById -ControlId 'DEP.TGT-01' }).domain
+        }
+
+        It 'reports exactly one Unknown finding carrying the three P13 strings when no planned name was supplied, and contacts nothing' {
+            $template = & (Get-Module $script:ModuleName) { Get-ExchDeploymentTemplatePath }
+            foreach ($run in @((New-TestNameRun -NoDeployment), (New-TestNameRun -Targets @() -Witness '' -DagName '' -InternalNames @()), (New-TestNameRun -Targets @('  ') -Witness ' ' -DagName '' -InternalNames @('')))) {
+                $result = Invoke-TestName -Run $run
+                @($result.findings).Count | Should -Be 1
+                @($result.sections).Count | Should -Be 0
+                $finding = $result.findings[0]
+                $finding.controlId | Should -Be 'DEP.NAME-01'
+                $finding.result.outcome | Should -Be 'Unknown'
+                $finding.result.rationale.Contains($template) | Should -BeTrue
+                $finding.result.rationale.Contains('New-ExchDeploymentConfig -Path .\Deployment.psd1') | Should -BeTrue
+                $finding.result.rationale.Contains('-ConfigPath .\Deployment.psd1') | Should -BeTrue
+                $finding.result.rationale | Should -Match 'does not mean the names are free'
+            }
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Find-ExchDirectoryComputer -Times 0 -Exactly
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Find-ExchDirectoryExchangeObject -Times 0 -Exactly
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Resolve-ExchPlannedDnsName -Times 0 -Exactly
+        }
+
+        It 'reports a DAG name already held by a computer object as in use, naming what holds it' {
+            $script:NameScenario = @{ Computers = @{ 'DAG01' = @(New-TestComputer -Name 'DAG01' -DnsHostName '' -Ou 'Clusters') } }
+            $result = Invoke-TestName -Run (New-TestNameRun)
+            $row = Get-TestNameRow -Result $result -Role 'DagName' -Check 'ComputerObject'
+
+            $row.Outcome | Should -Be 'NonCompliant'
+            $row.Status | Should -Be 'InUse'
+            $row.HeldBy | Should -Match 'CN=DAG01,OU=Clusters,DC=example,DC=test'
+            $result.findings[0].result.outcome | Should -Be 'NonCompliant'
+            $result.findings[0].result.rationale | Should -Match 'already in use.*CN=DAG01,OU=Clusters'
+        }
+
+        It 'reports an internal name that already resolves as in use, naming the records, and not as an error' {
+            $script:NameScenario = @{ Dns = @{ 'mail.example.test' = [pscustomobject]@{ Status = 'Resolves'; Records = @('A mail.example.test 192.0.2.80'); Error = '' } } }
+            $result = Invoke-TestName -Run (New-TestNameRun)
+            $row = Get-TestNameRow -Result $result -Role 'InternalName' -Check 'DnsRecord' -Name 'mail.example.test'
+
+            $row.Outcome | Should -Be 'PartiallyCompliant'
+            $row.Status | Should -Be 'InUse'
+            $row.HeldBy | Should -Be 'A mail.example.test 192.0.2.80'
+            (Get-TestNameRow -Result $result -Role 'InternalName' -Check 'DnsRecord' -Name 'autodiscover.example.test').Outcome | Should -Be 'Compliant'
+            $result.findings[0].result.outcome | Should -Be 'PartiallyCompliant'
+            $result.findings[0].result.rationale | Should -Match '192\.0\.2\.80'
+        }
+
+        It 'treats a server name held by its own computer account as free, and one held by another computer or twice as in use' {
+            $own = Invoke-TestName -Run (New-TestNameRun)
+            foreach ($name in @('mbx01.example.test', 'mbx02.example.test')) {
+                $row = Get-TestNameRow -Result $own -Role 'TargetServer' -Check 'ComputerObject' -Name $name
+                $row.Outcome | Should -Be 'Compliant'
+                $row.Status | Should -Be 'OwnAccount'
+            }
+
+            $script:NameScenario = @{ Computers = @{
+                'mbx02' = @(New-TestComputer -Name 'MBX02' -DnsHostName 'mbx02.other.test')
+                'fsw01' = @((New-TestComputer -Name 'FSW01' -DnsHostName 'fsw01.example.test'), (New-TestComputer -Name 'FSW01' -DnsHostName 'fsw01.child.example.test' -Ou 'Old'))
+            } }
+            $held = Invoke-TestName -Run (New-TestNameRun)
+            $another = Get-TestNameRow -Result $held -Role 'TargetServer' -Check 'ComputerObject' -Name 'mbx02.example.test'
+            $another.Outcome | Should -Be 'NonCompliant'
+            $another.Status | Should -Be 'HeldByAnother'
+            $another.Cause | Should -Match 'mbx02\.other\.test'
+            $twice = Get-TestNameRow -Result $held -Role 'WitnessServer' -Check 'ComputerObject'
+            $twice.Outcome | Should -Be 'NonCompliant'
+            $twice.Status | Should -Be 'Duplicate'
+        }
+
+        It 'evaluates all 7 declared name checks - 1 per target server, 1 for the witness, 4 for the DAG name and 1 per internal name' {
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:NameCollectorFile, [ref]$null, [ref]$null)
+            $definition = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-ExchNameCheckDefinition' }, $true)
+            $declared = @([regex]::Matches($definition.Extent.Text, "Role = '(?<role>\w+)';\s+Check = '(?<check>\w+)'") | ForEach-Object { [pscustomobject]@{ Role = $_.Groups['role'].Value; Check = $_.Groups['check'].Value } })
+            $declared.Count | Should -Be $script:DeclaredNameCheckCount
+            $perRole = @{}
+            foreach ($group in ($declared | Group-Object -Property Role)) { $perRole[$group.Name] = $group.Count }
+            $perRole['TargetServer'] | Should -Be 1
+            $perRole['WitnessServer'] | Should -Be 1
+            $perRole['DagName'] | Should -Be 4
+            $perRole['InternalName'] | Should -Be 1
+
+            $targets = @('mbx01.example.test', 'mbx02.example.test')
+            $internal = @('mail.example.test', 'autodiscover.example.test', 'owa.example.test')
+            $result = Invoke-TestName -Run (New-TestNameRun -Targets $targets -InternalNames $internal)
+            $rows = @($result.findings[0].result.metrics.checks)
+            $expected = ($targets.Count * $perRole['TargetServer']) + $perRole['WitnessServer'] + $perRole['DagName'] + ($internal.Count * $perRole['InternalName'])
+            $rows.Count | Should -Be $expected
+            foreach ($item in $declared) {
+                $names = switch ($item.Role) { 'TargetServer' { $targets } 'WitnessServer' { @('fsw01.example.test') } 'DagName' { @('DAG01') } 'InternalName' { $internal } }
+                foreach ($name in $names) {
+                    @($rows | Where-Object { $_.Role -eq $item.Role -and $_.Check -eq $item.Check -and $_.Name -eq $name }).Count | Should -Be 1 -Because "$($item.Role) $name needs its $($item.Check) check"
+                }
+            }
+            foreach ($row in $rows) { $row.Outcome | Should -Be 'Compliant' -Because "$($row.Role) $($row.Name) $($row.Check) is free in the mocks" }
+        }
+
+        It 'states what the instruments cannot see, even when every name is free, so an absence is not read as proof' {
+            $result = Invoke-TestName -Run (New-TestNameRun)
+            $result.findings[0].result.outcome | Should -Be 'Compliant'
+            $rationale = $result.findings[0].result.rationale
+            $rationale | Should -Match 'cannot see'
+            $rationale | Should -Match 'another forest'
+            $rationale | Should -Match 'resolver that was not queried'
+            $rationale | Should -Match 'not proof that a name is free'
+            $rationale | Should -Match 'gc01\.example\.test:3268'
+        }
+
+        It 'reports a DAG name that is too long, holds a disallowed character or only numerals as invalid' {
+            $long = Invoke-TestName -Run (New-TestNameRun -DagName 'DAG-NAME-TOO-LONG')
+            (Get-TestNameRow -Result $long -Role 'DagName' -Check 'NameLength').Outcome | Should -Be 'NonCompliant'
+            (Get-TestNameRow -Result $long -Role 'DagName' -Check 'NameCharacters').Outcome | Should -Be 'Compliant'
+
+            $underscore = Invoke-TestName -Run (New-TestNameRun -DagName 'DAG_01')
+            (Get-TestNameRow -Result $underscore -Role 'DagName' -Check 'NameCharacters').Outcome | Should -Be 'NonCompliant'
+            (Get-TestNameRow -Result $underscore -Role 'DagName' -Check 'NameLength').Outcome | Should -Be 'Compliant'
+
+            (Get-TestNameRow -Result (Invoke-TestName -Run (New-TestNameRun -DagName '12345')) -Role 'DagName' -Check 'NameCharacters').Cause | Should -Match 'only numerals'
+        }
+
+        It 'reports a DAG name held by an Exchange configuration object as in use, and an unprepared directory as nothing holding it' {
+            $script:NameScenario = @{ ExchangeObjects = @{ 'DAG01' = @([pscustomobject]@{ DistinguishedName = 'CN=DAG01,CN=Database Availability Groups,CN=Test,CN=Microsoft Exchange,CN=Services,CN=Configuration,DC=example,DC=test'; ObjectClass = 'msExchMDBAvailabilityGroup' }) } }
+            $taken = Get-TestNameRow -Result (Invoke-TestName -Run (New-TestNameRun)) -Role 'DagName' -Check 'ExistingExchangeObject'
+            $taken.Outcome | Should -Be 'NonCompliant'
+            $taken.HeldBy | Should -Match 'CN=Database Availability Groups'
+
+            $script:NameScenario = @{ NoExchangeOrganization = $true }
+            $unprepared = Get-TestNameRow -Result (Invoke-TestName -Run (New-TestNameRun)) -Role 'DagName' -Check 'ExistingExchangeObject'
+            $unprepared.Outcome | Should -Be 'Compliant'
+            $unprepared.Status | Should -Be 'NoExchangeOrganization'
+        }
+
+        It 'reports the directory checks Unknown when the directory cannot be read, and still checks DNS' {
+            $script:NameScenario = @{ DirectoryFails = $true }
+            $result = Invoke-TestName -Run (New-TestNameRun)
+            $directoryRows = @($result.findings[0].result.metrics.checks | Where-Object { $_.Instrument -eq 'Directory' })
+            $directoryRows.Count | Should -Be 5
+            foreach ($row in $directoryRows) {
+                $row.Outcome | Should -Be 'Unknown'
+                $row.Cause | Should -Match 'the directory could not be read \(test\)'
+            }
+            foreach ($row in @($result.findings[0].result.metrics.checks | Where-Object { $_.Instrument -eq 'DNS' })) { $row.Outcome | Should -Be 'Compliant' }
+            $result.findings[0].result.outcome | Should -Be 'Unknown'
+        }
+
+        It 'checks the names that were supplied and names each key that was not' {
+            $result = Invoke-TestName -Run (New-TestNameRun -Targets @() -Witness '' -InternalNames @())
+            $rows = @($result.findings[0].result.metrics.checks)
+            @($rows | Where-Object { $_.Role -eq 'DagName' }).Count | Should -Be 4
+            @($rows | Where-Object { $_.Status -eq 'NotSupplied' } | ForEach-Object { $_.Role }) | Should -Be @('TargetServers', 'WitnessServer', 'InternalNames')
+            $result.findings[0].result.outcome | Should -Be 'Unknown'
+            $result.findings[0].result.rationale | Should -Match 'Deployment\.TargetServers, Deployment\.WitnessServer, Deployment\.InternalNames were not supplied'
+            $result.findings[0].result.rationale | Should -Match ([regex]::Escape('New-ExchDeploymentConfig -Path .\Deployment.psd1'))
+        }
+    }
+
     Context 'Static analysis' {
 
         It 'reports no PSScriptAnalyzer findings for the repository' {

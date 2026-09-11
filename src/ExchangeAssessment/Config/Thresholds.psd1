@@ -461,6 +461,89 @@ statement it says so.
     }
 
     # --------------------------------------------------------------------------------------
+    # File share witness prerequisites (DEP.WIT-01) and planned-name rules (DEP.NAME-01)
+    # Top-level keys of their own, not under Deployment: Deployment is the operator's P13
+    # contract. Each value carries the Microsoft Learn page it was read from and the date, and
+    # a value that was measured rather than read says where in Measured. Override through
+    # -ConfigPath like any threshold; nested tables merge, so an override may change Value alone.
+    # --------------------------------------------------------------------------------------
+    WitnessPrerequisites = @{
+        MinimumOsVersion = @{
+            Value  = '6.0'
+            Source = @(
+                'https://learn.microsoft.com/exchange/high-availability/manage-ha/manage-dags#creating-dags'
+                'https://learn.microsoft.com/windows/win32/sysinfo/operating-system-version'
+            )
+            Read   = '2026-09-11'
+            Note   = 'manage-dags: "The witness server must be running Windows Server 2008 or later." The operating system version table gives Windows Server 2008 as 6.0.'
+        }
+        ServerProductTypes = @{
+            Value  = @(2, 3)
+            Source = @('https://learn.microsoft.com/windows/win32/cimwin32prov/win32-operatingsystem')
+            Read   = '2026-09-11'
+            Note   = 'Win32_OperatingSystem.ProductType: 1 Work Station, 2 Domain Controller, 3 Server.'
+        }
+        DomainControllerRoles = @{
+            Value  = @(4, 5)
+            Source = @('https://learn.microsoft.com/windows/win32/cimwin32prov/win32-computersystem')
+            Read   = '2026-09-11'
+            Note   = 'Win32_ComputerSystem.DomainRole: 4 Backup Domain Controller, 5 Primary Domain Controller.'
+        }
+        TrustedSubsystemGroup = @{
+            Value  = 'Exchange Trusted Subsystem'
+            Source = @(
+                'https://learn.microsoft.com/exchange/high-availability/manage-ha/create-dags'
+                'https://learn.microsoft.com/exchange/high-availability/manage-ha/manage-dags#creating-dags'
+                'https://learn.microsoft.com/powershell/module/exchangepowershell/new-databaseavailabilitygroup'
+                'https://learn.microsoft.com/exchange/plan-and-deploy/active-directory/ad-changes'
+            )
+            Read   = '2026-09-11'
+            Note   = 'The spelling of create-dags, manage-dags, New-DatabaseAvailabilityGroup and ad-changes, which lists it among the groups /PrepareAD creates in the Microsoft Exchange Security Groups OU of the forest root domain. The Azure witness page spells it "Exchange Trusted Subsystems".'
+        }
+        FileServerFeature = @{
+            Value  = 'FS-FileServer'
+            Source = @(
+                'https://learn.microsoft.com/exchange/high-availability/manage-ha/azure-vms-as-dag-witness-servers'
+                'https://learn.microsoft.com/windows-server/failover-clustering/deploy-two-node-clustered-file-server'
+            )
+            Read   = '2026-09-11'
+            Note   = 'The Azure witness page lists "Add the File Server role" among the prerequisites for an Exchange DAG witness; the clustered file server page installs the File Server role as FS-FileServer.'
+        }
+        FileAndPrinterSharingFirewallGroup = @{
+            Value    = '@FirewallAPI.dll,-28502'
+            Source   = @('https://learn.microsoft.com/exchange/high-availability/manage-ha/manage-dags#creating-dags')
+            Read     = '2026-09-11'
+            Note     = 'manage-dags: if Windows Firewall is enabled on the witness, "you must enable the Windows Firewall exception for File and Printer Sharing".'
+            Measured = 'The group id of the File and Printer Sharing rules, read with Get-NetFirewallRule on the dev VM (Windows 11 build 26100) on 2026-09-11. Learn names the exception, not the id, and the id has not been read on Windows Server; P14.9 confirms it.'
+        }
+        WmiFirewallGroup = @{
+            Value    = '@FirewallAPI.dll,-34251'
+            Source   = @('https://learn.microsoft.com/exchange/high-availability/manage-ha/manage-dags#creating-dags')
+            Read     = '2026-09-11'
+            Note     = 'manage-dags: Exchange uses WMI to create the witness directory and share, and with Windows Firewall enabled and "no firewall exceptions configured for WMI" New-DatabaseAvailabilityGroup fails.'
+            Measured = 'The group id of the Windows Management Instrumentation (WMI) rules, read with Get-NetFirewallRule on the dev VM (Windows 11 build 26100) on 2026-09-11. Not yet read on Windows Server; P14.9 confirms it.'
+        }
+    }
+
+    PlannedNames = @{
+        DagNameMaxLength = @{
+            Value  = 15
+            Source = @(
+                'https://learn.microsoft.com/exchange/high-availability/manage-ha/manage-dags#creating-dags'
+                'https://learn.microsoft.com/powershell/module/exchangepowershell/new-databaseavailabilitygroup'
+            )
+            Read   = '2026-09-11'
+            Note   = 'manage-dags: "a name for the DAG no longer than 15 characters that''s unique within the Active Directory forest"; New-DatabaseAvailabilityGroup: "a valid computer name for the DAG".'
+        }
+        ComputerNamePattern = @{
+            Value  = '^[A-Za-z0-9-]+$'
+            Source = @('https://learn.microsoft.com/troubleshoot/windows-server/active-directory/naming-conventions-for-computer-domain-site-ou')
+            Read   = '2026-09-11'
+            Note   = 'A NetBIOS computer name is the DNS host name, so the DNS host name rules apply: A-Z, 0-9 and the minus sign only, not only numerals, the first character alphabetic or numeric, and the last not a minus sign or a period.'
+        }
+    }
+
+    # --------------------------------------------------------------------------------------
     # Reporting
     # --------------------------------------------------------------------------------------
     MaxRowsPerSection = 500

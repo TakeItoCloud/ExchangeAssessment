@@ -9,7 +9,8 @@ Config/Deployment.template.psd1, and ride on the run's merged configuration.
 What lives here is the contract itself - its keys, where the template is, what a given
 configuration is missing, and the instructions for supplying it - so the preflight check and the
 DEP.* collectors say, by name and in the same words, what the operator has not supplied.
-DEP.TGT-01 reads TargetServers.
+DEP.TGT-01 and DEP.NET-01 read TargetServers, DEP.WIT-01 reads WitnessServer, and DEP.NAME-01
+reads TargetServers, WitnessServer, DagName and InternalNames.
 #>
 
 Set-StrictMode -Version Latest
@@ -87,6 +88,54 @@ function Get-ExchDeploymentConfigInstruction {
         PassBackRun    = 'New-ExchRun -OutputRoot <folder> -ConfigPath .\Deployment.psd1'
         PassBackScript = '.\scripts\Invoke-ExchAssess.ps1 -TenantHint <name> -ConfigPath .\Deployment.psd1'
     }
+}
+
+function Get-ExchDeploymentSupplyInstruction {
+    <#
+    The sentence that tells the operator how to supply the named keys: the template, the command
+    that copies it, and both ways of passing it back. Every DEP.* collector that reports a key as
+    not supplied ends its rationale with this, so none of them words it differently.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateNotNullOrEmpty()][string[]]$Keys)
+
+    $instruction = Get-ExchDeploymentConfigInstruction
+    return ("Template: {0}. Create a copy: {1}. Fill in {4}, then pass it back: {2} (or {3})." -f `
+        $instruction.Template, $instruction.CreateCommand, $instruction.PassBackScript, $instruction.PassBackRun, ($Keys -join ', '))
+}
+
+function Get-ExchDeploymentValue {
+    <#
+    The values of one Deployment key: trimmed, blanks dropped, and a value listed twice kept once,
+    in its first spelling. A single string and an array read the same way.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateNotNull()]$Run,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Key
+    )
+
+    $seen = @{}
+    $values = New-Object System.Collections.Generic.List[string]
+    foreach ($item in @(Get-ExchThreshold -Run $Run -Name ('Deployment.{0}' -f $Key) -Default @())) {
+        $text = ([string]$item).Trim()
+        if (-not $text) { continue }
+        $folded = $text.ToLowerInvariant()
+        if ($seen.ContainsKey($folded)) { continue }
+        $seen[$folded] = $true
+        $values.Add($text) | Out-Null
+    }
+    return $values.ToArray()
+}
+
+function Get-ExchDeploymentWitnessServer {
+    <#
+    Deployment.WitnessServer, trimmed, or '' when it was not supplied.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateNotNull()]$Run)
+
+    return [string](@(Get-ExchDeploymentValue -Run $Run -Key 'WitnessServer') | Select-Object -First 1)
 }
 
 function Get-ExchDeploymentConfigWarning {
