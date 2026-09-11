@@ -6,13 +6,14 @@ ExchangeAssessment reads an on-premises or hybrid Exchange organisation and repo
 the **configuration** it found, and the **problems** in that configuration. It is read-only —
 every collector reads, and the only writes are into the local run folder.
 
-A run drives 36 collectors across the whole organisation - servers, Active Directory, Exchange
+A run drives 38 collectors across the whole organisation - servers, Active Directory, Exchange
 version and patch state, databases, DAG and replication, transport configuration, connectors and
 queues, certificates, TLS, anti-malware, RBAC, mailboxes, retention and audit, client access,
 public folders, address lists, hybrid, identity sync, DNS posture and event logs, and for a
 greenfield deployment the prerequisites and network reachability of the member servers named for
-it, the prerequisites of its file share witness, and whether its planned names are free - plus, on
-request, the Exchange Online side of a hybrid organisation. It then writes:
+it, the prerequisites of its file share witness, whether its planned names are free, its database and
+log volumes, and one readiness verdict rolled up from all of them - plus, on request, the Exchange
+Online side of a hybrid organisation. It then writes:
 
 - **`csv/`** — one CSV per configuration area, plus `csv/findings.csv`. The complete record.
 - **`assessment.json`** — the whole assessment in one file: configuration inventory, findings
@@ -59,6 +60,8 @@ Extracted from `infra-scripting-suite/powershell/Assessments/ExchangeAssessment`
 | `DEP.NET-01` | Greenfield deployment: network reachability probed **from** each server in `Deployment.TargetServers` to the domain controllers, the witness, the other targets and its DNS servers - see *Planning a new deployment* |
 | `DEP.WIT-01` | Greenfield deployment: the server in `Deployment.WitnessServer` against the file share witness prerequisites Microsoft Learn states - see *Planning a new deployment* |
 | `DEP.NAME-01` | Greenfield deployment: whether the planned DAG name, server names and internal names are free - see *Planning a new deployment* |
+| `DEP.VOL-01` | Greenfield deployment: the volumes named in `Deployment.DatabaseVolume` and `Deployment.LogVolume` on each target server - present, free space, file system, allocation unit, and whether they are the same volume - see *Planning a new deployment* |
+| `DEP-01` | Greenfield deployment readiness, rolled up from `ENV.VERS-01` and the five `DEP.*` controls above - see *Greenfield deployment assessment* |
 
 Four more run only with `-IncludeExchangeOnline`:
 
@@ -102,7 +105,7 @@ View-Only Organization Management in Exchange plus domain read covers most colle
 event log and anti-malware exclusion collectors need local administrative rights on the
 Exchange servers.
 
-Six controls need a little more, and say so in their output rather than failing:
+Seven controls need a little more, and say so in their output rather than failing:
 
 - **`TR.CO-01`** runs `Get-ADPermission` against each receive connector to find out whether an
   anonymous principal actually holds `ms-Exch-SMTP-Accept-Any-Recipient` — the permission that
@@ -131,6 +134,8 @@ Six controls need a little more, and say so in their output rather than failing:
 - **`DEP.NAME-01`** searches a global catalog of the forest for computer objects, reads the
   `CN=Microsoft Exchange,CN=Services` container of the configuration partition, and resolves the
   planned internal names with the assessment host's own DNS servers. Domain read covers it.
+- **`DEP.VOL-01`** reads `Win32_Volume` on each server named in `Deployment.TargetServers` over CIM,
+  and never uses WinRM. A target it cannot read has every volume check `Unknown`, naming the error.
 
 ## Install
 
@@ -347,9 +352,89 @@ The witness and planned-name rules live in `Config/Thresholds.psd1` under `Witne
 and `PlannedNames`, each value with the Learn page it was read from and the date; the two firewall
 rule-group ids say they were measured on the dev VM rather than read on Learn.
 
-The remaining greenfield controls - database and log volumes and the roll-up - are
-[PORT-PLAN.md](PORT-PLAN.md) phase P14. A filled copy holds client host names, so keep it out
-of source control. `Deployment.psd1` is gitignored in this repository for that reason.
+`DEP.VOL-01` checks, on each target server, the volumes named in `DatabaseVolume` and `LogVolume`:
+that a volume is mounted at exactly that path, its free space, that it is NTFS or ReFS, and its
+allocation unit size. A path that is only a folder on another volume is reported as absent, naming
+the volume it would fall on - that volume is never judged in its place. Microsoft Learn states every
+allocation unit size as supported and 64 KB as the best practice, so another size is reported, not
+failed. Whether the database and log volumes are the same volume is always reported and never
+failed: Learn states no requirement either way - separate volumes on separate physical disks is its
+best practice for a stand-alone server, and "Isolation of logs and databases isn't required" for
+high availability - and the deployment config does not say how many database copies are planned.
+Learn gives no absolute free-space figure, only sizing rules relative to the calculated database
+size and the log generation rate, so `DeploymentVolumes.DatabaseVolumeMinimumFreeGB` and
+`DeploymentVolumes.LogVolumeMinimumFreeGB` in `Config/Thresholds.psd1` ship `$null`, and the
+free-space check is `Unknown` until you supply the figures your sizing gives, in the same file as
+the `Deployment` section:
+
+```powershell
+DeploymentVolumes = @{
+    DatabaseVolumeMinimumFreeGB = @{ Value = <GB from your sizing> }
+    LogVolumeMinimumFreeGB      = @{ Value = <GB from your sizing> }
+}
+```
+
+The placeholders are deliberately not valid PowerShell data: a copy left unedited fails to load
+instead of passing every volume.
+
+A filled copy holds client host names, so keep it out of source control. `Deployment.psd1` is
+gitignored in this repository for that reason.
+
+### Greenfield deployment assessment
+
+`DEP-01` answers one question about a planned Exchange Server SE deployment: was every prerequisite
+this tool checks measured, and was it met? It measures nothing itself. It reads the findings of six
+controls - `ENV.VERS-01` for the directory (forest and domain functional levels, the Exchange schema
+and Active Directory preparation, the Schema Master), and `DEP.TGT-01`, `DEP.NET-01`, `DEP.WIT-01`,
+`DEP.NAME-01` and `DEP.VOL-01` - and reports one verdict. Its rationale is written in three groups,
+always all three: what was measured and passed, what was measured and did not pass, and what could
+not be assessed, with the cause of each. An empty group reads `(0): none`.
+
+It fails closed. Any prerequisite that could not be assessed makes the verdict `Unknown`, whatever the
+others report: a control that did not run - skipped, as `-SkipDomainQueries` skips `ENV.VERS-01`, or
+failed before returning a result - one that ran and reported `Unknown`, and one that reported
+`Compliant` while marking part of its own scope as not assessed (sufficiency `SoftFail` or
+`HardFail`). The first reads "did not run" and the others "ran and reported", so the two causes are
+never confused. `Compliant` means every prerequisite this tool checks was measured and met. It does
+not mean Exchange Setup will succeed: Setup runs its own readiness checks.
+
+It deliberately does not read `EX.CH-01` or `ENV.OS-01`, which `UPG-01` does. Both read the servers
+`Get-ExchangeServer` returns, so both need an existing Exchange organisation - which a greenfield
+deployment does not have.
+
+**Discovered, and supplied.** Domain controllers, domains and the forest are discovered from Active
+Directory and never supplied. The target servers, the witness and the planned names must be
+supplied, because nothing in the directory identifies a server that is not yet an Exchange server.
+`DEP-01` depends on every key of the `Deployment` section - `TargetServers`, `WitnessServer`,
+`DagName`, `InternalNames`, `DatabaseVolume` and `LogVolume` - because each feeds a control it reads.
+Produce the config from the template and pass it back:
+
+```powershell
+New-ExchDeploymentConfig -Path .\Deployment.psd1
+notepad .\Deployment.psd1
+.\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -ConfigPath .\Deployment.psd1
+```
+
+**With the shipped reference files `DEP-01` cannot report `Compliant`.** Each of the following holds a
+`$null` where Microsoft Learn states no value; the check that reads it reports `Unknown`, and so does
+`DEP-01`:
+
+- `Config/PrereqTable.psd1`, read by `DEP.TGT-01`: `VisualCppRedistributable2012Version`,
+  `VisualCppRedistributable2013`, `VisualCppRedistributable2013Version`, `UcmaRuntimeVersion` and
+  `IisUrlRewrite`, and inside `DotNetFrameworkRelease` the Windows Server 2019 row (`10.0.17763`),
+  which matters only for a target on Windows Server 2019. Fill them in a copy you have verified and
+  pass it with `-PrereqTablePath`.
+- `Config/PortMatrix.psd1`, read by `DEP.NET-01`: the port of `WitnessWmi`, the WMI flow to the
+  witness, which Learn names without a port. An operator who has verified the port can supply it in a
+  copy passed with `-PortMatrixPath`.
+- `DeploymentVolumes.DatabaseVolumeMinimumFreeGB` and `DeploymentVolumes.LogVolumeMinimumFreeGB` in
+  `Config/Thresholds.psd1`, read by `DEP.VOL-01`. Supply them with `-ConfigPath`, as above.
+
+Three conditions keep it `Unknown` whatever the reference files say, and each says so in its own
+finding. With one target server, `DEP.NET-01`'s flows to another target have no destination. Before
+Active Directory is prepared for Exchange, the Exchange Trusted Subsystem group does not exist yet,
+so `DEP.WIT-01` cannot check the witness grant; and `ENV.VERS-01` cannot read the Exchange preparation
+values, marks itself `SoftFail`, and `DEP-01` counts that as not assessed.
 
 ### Keeping the port matrix current
 

@@ -52,6 +52,9 @@ function Get-ExchCollectorRegistry {
         @{ Id='DEP.NET-01';  Function='Invoke-ExchCollector_DEP_NET_01_TargetPortMatrix';      Area='Deployment'; Requires=@();                                   Cloud=$false; SkipFlag='SkipDeploymentChecks' }
         @{ Id='DEP.WIT-01';  Function='Invoke-ExchCollector_DEP_WIT_01_WitnessReadiness';      Area='Deployment'; Requires=@();                                   Cloud=$false; SkipFlag='SkipDeploymentChecks' }
         @{ Id='DEP.NAME-01'; Function='Invoke-ExchCollector_DEP_NAME_01_NameAvailability';     Area='Deployment'; Requires=@();                                   Cloud=$false; SkipFlag='SkipDeploymentChecks' }
+        @{ Id='DEP.VOL-01';  Function='Invoke-ExchCollector_DEP_VOL_01_VolumeReadiness';       Area='Deployment'; Requires=@();                                   Cloud=$false; SkipFlag='SkipDeploymentChecks' }
+        # DEP-01 deliberately does not require EX.CH-01 or ENV.OS-01: see its file header.
+        @{ Id='DEP-01';      Function='Invoke-ExchCollector_DEP_01_DeploymentReadiness';       Area='Deployment'; Requires=@('ENV.VERS-01','DEP.TGT-01','DEP.NET-01','DEP.WIT-01','DEP.NAME-01','DEP.VOL-01'); Cloud=$false; SkipFlag='SkipDeploymentChecks' }
         @{ Id='CLD.ORG-01';  Function='Invoke-ExchCollector_CLD_ORG_01_TenantOrganization'; Area='Cloud';       Requires=@();                                     Cloud=$true;  SkipFlag='' }
         @{ Id='CLD.CONN-01'; Function='Invoke-ExchCollector_CLD_CONN_01_TenantConnector';   Area='Cloud';       Requires=@();                                     Cloud=$true;  SkipFlag='' }
         @{ Id='CLD.SEC-01';  Function='Invoke-ExchCollector_CLD_SEC_01_TenantSecurity';     Area='Cloud';       Requires=@();                                     Cloud=$true;  SkipFlag='' }

@@ -7,7 +7,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added — 2026-09-11 (phases P14.3 and P14.4, `DEP.WIT-01` and `DEP.NAME-01`)
+### Added — 2026-09-11 (phases P14.5 and P14.6, `DEP.VOL-01` and `DEP-01`)
+
+The last two greenfield deployment controls, which complete the `DEP.*` set: the database and log
+volumes the plan names, and one readiness verdict rolled up from everything a greenfield deployment is
+checked for.
+
+- **`Collectors/DEP.VOL-01.VolumeReadiness.ps1`**, registered as `DEP.VOL-01`, area `Deployment`, no
+  `Requires`, `Cloud = $false`, skip flag `SkipDeploymentChecks`, catalog domain `Environment` as for the
+  other `DEP.*` controls, so the `ControlDomain` ValidateSet is unchanged. It reads
+  `Deployment.TargetServers`, `Deployment.DatabaseVolume` and `Deployment.LogVolume` and nothing else.
+  **With no target server, or neither volume, it reports one `Unknown` finding, severity Info, naming the
+  missing keys through the shared P13 helper, and contacts nothing.** With one volume supplied it checks
+  that one and names the other. On each target, over CIM only, for each supplied volume: a volume is
+  mounted at exactly that path - a path that is only a folder on another volume is reported as absent,
+  naming the volume it would fall on, and that volume is never judged in its place; free space against
+  `DeploymentVolumes`; NTFS or ReFS; the allocation unit size. Once per target: whether the database and
+  log volumes are the same volume - by the paths supplied, or by a shared `DeviceID`. A target that does
+  not resolve or does not answer CIM has every check `Unknown`, naming the cause.
+- **A shared volume and a non-64 KB allocation unit are reported, never failed** (`PartiallyCompliant`).
+  Both are best practices on Learn, not requirements. A free-space minimum that has not been supplied is
+  `Unknown` naming the key; the free space measured is still reported.
+- **`Collectors/DEP-01.DeploymentReadiness.ps1`**, registered as `DEP-01`, area `Deployment`, skip flag
+  `SkipDeploymentChecks`, domain `Environment`, with `Requires = @('ENV.VERS-01','DEP.TGT-01','DEP.NET-01',
+  'DEP.WIT-01','DEP.NAME-01','DEP.VOL-01')`. The greenfield counterpart of `UPG-01`, in its shape: it
+  measures nothing, keeps one row per prerequisite with the upstream rationale, and returns one verdict.
+  `ENV.VERS-01` supplies the directory-side prerequisites and `DEP-01` does not re-derive them. **It does
+  not require `EX.CH-01` or `ENV.OS-01`**: both read `Get-ExchangeServer`, so both need an existing
+  Exchange organisation, which a greenfield deployment does not have. The file header says so.
+- **`DEP-01` fails closed, where `UPG-01` does not.** Any prerequisite that could not be assessed makes
+  the verdict `Unknown` before `Get-ExchWorstOutcome` is consulted; that function only ever combines
+  measured outcomes, so a `Compliant` never outvotes an `Unknown`. A `Compliant` that the upstream itself
+  marked `SoftFail` or `HardFail` is not counted as passed. A control that did not run (`DidNotRun`: "did
+  not run: no result from it reached DEP-01 ...") and one that ran and reported `Unknown` ("ran and
+  reported Unknown:" followed by its own rationale) carry different statuses, messages and metrics (`notRun`,
+  `reportedUnknown`); a result with no finding under its own id is a third cause (`NoFinding`). The
+  rationale always writes three groups - measured and passed, measured and did not pass, could not be
+  assessed with the cause of each - an empty one as `(0): none`, and ends by saying that `Compliant` does
+  not mean Exchange Setup will succeed. Beside a known failure an unassessed prerequisite still makes
+  the verdict `Unknown`, and the severity stays High. With no deployment config the severity is Info and
+  the rationale carries the P13 instructions.
+- **`DeploymentVolumes`** in `Config/Thresholds.psd1`: four values, each with its Learn URL, read date and
+  a note quoting the text. `FileSystems` NTFS and ReFS; `AllocationUnitBytes` 65536; and
+  `DatabaseVolumeMinimumFreeGB` and `LogVolumeMinimumFreeGB` **`$null`**, because Learn gives no absolute
+  figure. Override with `-ConfigPath`; nested tables merge, so an override may change `Value` alone.
+- **Shared code.** `Get-ExchTargetState` gains `-CimOnly`, which skips the WinRM reading and records why
+  in `WinRmError`. Without the switch nothing changes, and the `DEP.TGT-01` and `DEP.WIT-01` tests pass
+  unchanged. `Get-ExchTargetMechanismGate` now gates `DEP.VOL-01` as well.
+
+**Read on Microsoft Learn, 2026-09-11.** Exchange Server storage configuration options (applies to 2016,
+2019 and Subscription Edition): File system "Supported: NTFS and ReFS."; NTFS and ReFS allocation unit
+size "Supported: All allocation unit sizes. Best practice: 64 KB for both .edb and log file volumes.";
+database per log isolation, stand-alone "Best practice: For recoverability, move database (.edb) file and
+logs from the same database to different volumes backed by different physical disks.", high
+availability "Supported: Isolation of logs and databases isn't required."; co-location "not recommended
+in standalone architectures"; with JBOD "create a single volume with separate directories for
+database(s) and for log files"; sizing "Provision for 120 percent of calculated maximum database size"
+and "three days of log generation capacity". System requirements: ReFS "Supported on partitions that
+contain" mailbox databases and transaction logs. **Learn is not silent on separation, but it states no
+requirement either way**, and the deployment config does not say how many database copies are
+planned, so the tool reports the fact and does not decide which column applies.
+
+**Found, not fixed - P17.** `UPG-01`, the roll-up `DEP-01` was modelled on, does not fail closed at the
+outcome level. Run on the dev VM with `EX.CH-01` absent from `-Upstream` and the other two `Compliant`, it
+returned outcome `Compliant`, sufficiency `SoftFail`. `Get-ExchWorstOutcome` returns `Compliant` for
+`Compliant, Unknown`, and `ENV.VERS-01` combines its own items the same way. Changing either would change
+their findings, so it is a new planned row, P17, and not part of this phase.
+
+**Changed.** `ModuleVersion` is **0.6.0**: the set of controls changed, which the PORT-PLAN rule treats as
+a changed finding. With no deployment config every run now carries two more findings, `DEP.VOL-01` and
+`DEP-01`, both `Unknown`, severity Info.
+
+**Tests** — eighteen added (116 to 134), all against mocks and TestDrive. For `DEP.VOL-01`, ten: the
+registry row; neither volume supplied, three ways, and no target server, each giving one `Unknown`/Info
+finding that names the missing keys and carries the P13 strings, with nothing contacted; one volume
+supplied; a volume that is not mounted, and a folder path, reported absent without judging the volume
+underneath; free space below a supplied minimum failed, and the shipped `$null` minimum `Unknown` naming the
+key; database and log on the same volume, by path and by `DeviceID`, reported with Learn's text and not
+failed, and distinct volumes `Compliant`; a target that does not answer CIM and a name that does not
+resolve, each `Unknown` on all 9 checks, with the other target unaffected and WinRM never called; all 9
+declared checks per target, counted from the collector's text; file system and allocation unit
+judgements; and a Learn URL and read date on every `DeploymentVolumes` value. For `DEP-01`, eight: the
+registry row, with `EX.CH-01` and `ENV.OS-01` absent from its `Requires`, the file header saying why, and
+no directory, CIM, WinRM, DNS or Exchange call in the file; `Requires` exactly the 6 declared controls,
+equal to every `DEP.*` registry row plus `ENV.VERS-01` and to the keys the collector reads, all ordered
+before it; all six `Compliant` giving `Compliant`; each of the six in turn reporting `Unknown` giving
+`Unknown` naming it and its reason; each of the six in turn absent, told apart from the same control
+reporting `Unknown`, plus a result with no finding; all three groups present when all passed, when none
+ran and when mixed; a `SoftFail` `Compliant` not counted as passed; and Info severity with no deployment
+config.
+
+**Falsification.** With the suite green, five mutations, each restored from a copy and proven identical
+by SHA256: letting a `Compliant` outvote an `Unknown` - `Get-ExchWorstOutcome` over every row, an
+unassessed one as `Unknown` - failed 4 tests; dropping `DEP.VOL-01` from `DEP-01`'s `Requires` failed 1
+("Expected 6, but got 5"); making a control that did not run read as passed failed 2; removing the
+did-not-pass group from the rationale failed 1; making database and log on the same volume report as
+distinct failed 1. The two new contexts re-ran 18 passed, 0 failed.
+
+**Verified on the dev VM only.** Under PowerShell 7.6.6 and Windows PowerShell 5.1.26100 - where the
+Pester suite cannot run - the new code was executed directly, with the same results under both.
+`Get-ExchTargetState -CimOnly` against `localhost` recorded the dev VM's WS-Management refusal as `CimState`
+Failed and `WinRmState` NotAttempted, "not attempted: the calling control reads CIM only". `Win32_Volume`
+read locally returned `Name`, `DeviceID`, `FileSystem`, `FreeSpace` and `BlockSize` on all four fixed
+volumes, and a volume with no drive letter reports its `\\?\Volume{...}\` path as `Name`. With only the CIM
+transport helper redefined to read locally, `DEP.VOL-01` with database and log both on `C:` reported the
+volume present and NTFS, the 4096-byte allocation unit `PartiallyCompliant`, free space measured and
+`Unknown` against the shipped `$null`, and the shared volume `PartiallyCompliant`; a folder path read "no
+volume at C:\ExchangeDatabases\; the path falls on C:\" and a missing letter "no volume at Q:\ among the 4
+fixed volumes read". `DEP-01` over synthetic upstream results returned `Compliant`, then `Unknown` for one
+upstream `Unknown`, then `Unknown` with status `DidNotRun` for an absent one. Free space printed as "49,9 GB
+free": the figure follows the host's culture, as `DEP.TGT-01`'s already does. **Not verified against a real
+target server or a real greenfield environment** - that is P14.12 and P14.13, owned by the operator.
 
 Two more greenfield deployment controls: the prerequisites of the file share witness, and whether
 the planned names are free. Neither can be discovered - the witness serves a DAG that does not
