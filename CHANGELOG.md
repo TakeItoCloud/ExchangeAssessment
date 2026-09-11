@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-09-11 (phase P13)
+
+The deployment config contract, and a warning that makes it hard to miss. The assessment
+discovers domain controllers, domains and the forest, and finds existing Exchange servers with
+`Get-ExchangeServer`. It cannot discover a server that is not an Exchange server yet, so a
+greenfield Exchange Server SE deployment's target servers, file share witness and planned names
+have to come from the operator. This phase defines where they go. It adds no collector: nothing
+reads the section yet except preflight, and the collectors that will are PORT-PLAN P14.
+
+- **`Config/Deployment.template.psd1`** — shipped empty. One `Deployment` key carrying
+  `TargetServers`, `WitnessServer`, `DagName`, `InternalNames`, `DatabaseVolume` and
+  `LogVolume`, each with a comment saying what it is, what supplying it enables and what leaving
+  it empty costs. It is merged over `Config/Thresholds.psd1` through the existing `-ConfigPath`,
+  and is copied out rather than edited in place.
+- **`New-ExchDeploymentConfig`** — writes a byte-for-byte copy of the template to `-Path` and
+  returns the resolved full path. The template is found from the module base at run time, so the
+  command works from any install location. An existing file is refused, naming the file and
+  `-Force`, unless `-Force` is given; `-WhatIf` is supported. Full comment-based help.
+- **`Get-ExchPreflightReport -Run`** — a new optional parameter. With no usable deployment config
+  it adds a warning saying that greenfield deployment controls will report `Unknown` because no
+  target servers, witness or planned names were supplied, carrying the template's resolved path,
+  `New-ExchDeploymentConfig -Path .\Deployment.psd1` and `-ConfigPath .\Deployment.psd1`. A partly
+  filled config gets a warning naming exactly the keys that are missing or empty. The return
+  shape is unchanged — one `warnings` property holding an array of strings — and a call with no
+  arguments still works: it reads the shipped defaults, which carry no deployment section, so it
+  warns.
+- **`Invoke-ExchAssess.ps1`** — passes the run to preflight and prints the deployment config
+  warning as a block between two rules of `=`. Every preflight warning is still written with
+  `Write-ExchEvent`. The script already had `-ConfigPath` and passed it to `New-ExchRun`, so no
+  parameter was added. The header is now comment-based help with a worked example.
+- README section *Planning a new deployment*. `.gitignore` gains `Deployment.psd1`, the name the
+  examples and the warning suggest; the template's own name does not match it.
+
+**A missing deployment config is a warning, never an error.** An assessment of an existing
+organisation needs none of it, and the run carries on either way.
+
+**Not changed.** No finding, outcome, severity or rationale, so `ModuleVersion` stays 0.2.0 under
+the PORT-PLAN rule. `CollectorRegistry.ps1` and `New-ExchRun`'s parameters are untouched.
+
+**Tests** — seventeen added (51 to 68). The template parses, carries exactly the six contract
+keys — counted a second time from the file's text so one key cannot pass for six — and ships
+empty; the module's key list matches it; the template path resolves from the module base and
+exists. `New-ExchDeploymentConfig` writes a parseable copy identical to the template, resolves a
+relative path, refuses an overwrite without `-Force` and leaves the file alone, overwrites with
+it, and writes nothing under `-WhatIf`. Preflight warns with the template path and both commands
+when nothing is supplied, including when called with no arguments and when handed the unfilled
+template; names exactly the missing keys of a partial config and no others; accepts a filled copy
+merged through the real `-ConfigPath` path; and keeps its return shape when the config is
+complete. Every new export has SYNOPSIS, DESCRIPTION, every PARAMETER and at least two EXAMPLE
+blocks, and the entry script's help carries the worked example.
+
 ### Changed — 2026-09-02 (P12 verification pass)
 
 `ModuleVersion` is **0.2.0**. P12 changed what several controls report, and two runs that say

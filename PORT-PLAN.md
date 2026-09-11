@@ -25,6 +25,9 @@ evaluate" from "passed", and the analyzer suspensions below are gone.
 | P10 | Full-environment collector coverage (see *P10 scope*) | Done | 2026-09-01 |
 | P11 | Exchange Online collection for the tenant side of a hybrid organisation | Done | 2026-09-01 |
 | P12 | Correctness fixes verified against Microsoft Learn: relay permission check, refreshed and externalised build table, 2016/2013 AD preparation levels, functional-level and OS supportability corrections, per-server queue scope | Done | 2026-09-02 |
+| P13 | Deployment config contract: shipped template, `New-ExchDeploymentConfig`, and a preflight warning naming what a greenfield deployment has not supplied (see *P13*) | Done | 2026-09-11 |
+| P14 | Greenfield deployment (`DEP.*`) collectors that read the P13 `Deployment` section | Planned | |
+| P15 | Generate the P13 deployment config from an approval table | Planned | |
 
 ## The 5.1 constraint
 
@@ -213,6 +216,26 @@ at a real organisation. CHANGELOG carries the detail. In short:
   level 10 to the Exchange supportability matrix, so claiming it was an unverified assertion.
 - Operating system supportability is per Exchange version rather than a single global floor.
 - `TR.QUE-01` queries each transport server by name instead of implying the local one.
+
+### P13 — Deployment config contract — Done 2026-09-11
+
+The assessment discovers domain controllers, domains and the forest, and finds existing Exchange
+servers with `Get-ExchangeServer`. It cannot discover a server that is not an Exchange server
+yet, so a greenfield Exchange Server SE deployment's target servers, file share witness and
+planned names have to be supplied by the operator. P13 defines where: a `Deployment` section,
+shaped by the shipped and empty `Config/Deployment.template.psd1`, written out by
+`New-ExchDeploymentConfig` and passed back with the existing `-ConfigPath`. Preflight warns -
+never fails - when the section is missing, with the template's resolved path and both commands,
+and names exactly the keys a partly filled config leaves empty. `Invoke-ExchAssess.ps1` prints
+that warning as a delimited block.
+
+No collector reads the section yet. P14 owns every `DEP.*` control and any change to
+`CollectorRegistry.ps1`; P15 owns generating the config from an approval table.
+
+Verified on the dev VM only, under PowerShell 7.6 and Windows PowerShell 5.1, with synthetic
+`.test` host names, plus one end-to-end `Invoke-ExchAssess.ps1` run on that VM with no Exchange
+present, which completed and printed the block. No Exchange organisation, domain controller or
+client host was involved, because the phase reads none.
 
 ### Cosmetic backlog
 

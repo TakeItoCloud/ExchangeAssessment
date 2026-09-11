@@ -1,11 +1,36 @@
-<#!
-Entry point for Exchange On-Prem/Hybrid Assessment.
+<#
+.SYNOPSIS
+    Entry point for Exchange On-Prem/Hybrid Assessment.
 
-Read-only against Exchange and Active Directory. Every write goes to the run folder.
+.DESCRIPTION
+    Read-only against Exchange and Active Directory. Every write goes to the run folder.
 
-Order matters: the reports are generated before the run is closed, so the SHA256 hash manifest
-covers the CSV and JSON output as well as the raw evidence. The ZIP is built last, after the
-manifest exists.
+    Order matters: the reports are generated before the run is closed, so the SHA256 hash
+    manifest covers the CSV and JSON output as well as the raw evidence. The ZIP is built last,
+    after the manifest exists.
+
+    Domain controllers, domains, the forest and existing Exchange servers are discovered. A
+    greenfield deployment's target servers, file share witness and planned names cannot be,
+    so they are supplied in a deployment config passed with -ConfigPath. Without one the
+    preflight check prints a delimited warning block saying so, and the run carries on.
+
+.EXAMPLE
+    PS> .\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso
+
+    Assesses the organisation and returns the run summary object.
+
+.EXAMPLE
+    PS> Import-Module .\src\ExchangeAssessment\ExchangeAssessment.psd1
+    PS> New-ExchDeploymentConfig -Path .\Deployment.psd1
+    PS> notepad .\Deployment.psd1
+    PS> .\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -ConfigPath .\Deployment.psd1
+
+    Worked example for a greenfield deployment. New-ExchDeploymentConfig writes a fillable copy
+    of the shipped deployment config template. Fill in TargetServers, WitnessServer, DagName,
+    InternalNames, DatabaseVolume and LogVolume, then pass the file with -ConfigPath, which this
+    script hands to New-ExchRun to merge over the default thresholds. Any key left empty is
+    named in the preflight warning. The filled file holds client host names: keep it out of
+    source control.
 #>
 
 [CmdletBinding()]
@@ -17,7 +42,9 @@ param(
     [Parameter()][switch]$SkipMailboxInventory,
     # Skip the external DNS lookups.
     [Parameter()][switch]$SkipDnsQueries,
-    # A .psd1 whose keys override Config/Thresholds.psd1 for this client.
+    # A .psd1 whose keys override Config/Thresholds.psd1 for this client. It also carries the
+    # Deployment section of a greenfield deployment config (New-ExchDeploymentConfig), and is
+    # passed through to New-ExchRun -ConfigPath.
     [Parameter()][string]$ConfigPath,
     # A .psd1 replacing Config/BuildTable.psd1, for a run against a newer copy of Microsoft's
     # Exchange build list than the one shipped with the module.
@@ -53,10 +80,19 @@ try {
         -CloudManagedIdentity:$CloudManagedIdentity -CloudManagedIdentityAccountId $CloudManagedIdentityAccountId
 
     try {
-        $pre = Get-ExchPreflightReport
+        $pre = Get-ExchPreflightReport -Run $run
         if ($pre -and $pre.warnings) {
             foreach ($w in $pre.warnings) {
-                Write-Warning $w
+                if ($w.StartsWith('Deployment config:')) {
+                    # A delimited block rather than one more warning line: in a scrolling run
+                    # this is the warning about inputs the directory cannot supply, and it
+                    # carries the commands that supply them.
+                    $rule = '=' * 78
+                    Write-Warning (@('', $rule, $w, $rule) -join [Environment]::NewLine)
+                }
+                else {
+                    Write-Warning $w
+                }
                 Write-ExchEvent -Run $run -Level WARN -Message 'Preflight' -Data @{ warning = $w }
             }
         }

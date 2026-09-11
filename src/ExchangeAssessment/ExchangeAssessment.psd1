@@ -21,7 +21,8 @@
         'Export-ExchEvidenceBundle',
         'Save-ExchFindings',
         'Write-ExchEvidenceFile',
-        'Get-ExchPreflightReport'
+        'Get-ExchPreflightReport',
+        'New-ExchDeploymentConfig'
     )
 
     CmdletsToExport   = @()

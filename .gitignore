@@ -29,3 +29,8 @@ $RECYCLE.BIN/
 
 # Pester -CI writes its NUnit report to the repository root.
 testResults.xml
+
+# A filled deployment config holds client host names - never commit one. Deployment.psd1 is the
+# name New-ExchDeploymentConfig's examples and the preflight warning suggest. The shipped
+# template, Deployment.template.psd1, does not match this and stays tracked.
+Deployment.psd1

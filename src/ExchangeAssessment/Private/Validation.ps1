@@ -21,7 +21,12 @@ function Test-ExchManagementShell {
 
 function Get-ExchPreflightReport {
     [CmdletBinding()]
-    param()
+    param(
+        # The run from New-ExchRun. Its merged configuration carries the Deployment section when
+        # one was supplied with -ConfigPath. Omitted, the shipped defaults are read instead, and
+        # they carry none.
+        [Parameter()]$Run
+    )
 
     $warnings = New-Object System.Collections.Generic.List[string]
 
@@ -35,6 +40,17 @@ function Get-ExchPreflightReport {
         }
     } catch {
         $warnings.Add('Unable to probe ActiveDirectory module presence.') | Out-Null
+    }
+
+    # A greenfield deployment's target servers, witness and planned names cannot be discovered,
+    # so their absence is said out loud. It is a warning and never a failure: an assessment of
+    # an existing organisation needs none of them.
+    try {
+        if (-not $Run) { $Run = [pscustomobject]@{ Config = (Import-ExchConfiguration) } }
+        $deploymentWarning = Get-ExchDeploymentConfigWarning -Deployment (Get-ExchThreshold -Run $Run -Name 'Deployment')
+        if ($deploymentWarning) { $warnings.Add($deploymentWarning) | Out-Null }
+    } catch {
+        $warnings.Add(('Deployment config: could not be evaluated ({0}). Greenfield deployment controls will report Unknown.' -f $_.Exception.Message)) | Out-Null
     }
 
     [pscustomobject]@{
