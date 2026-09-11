@@ -28,12 +28,13 @@ evaluate" from "passed", and the analyzer suspensions below are gone.
 | P13 | Deployment config contract: shipped template, `New-ExchDeploymentConfig`, and a preflight warning naming what a greenfield deployment has not supplied (see *P13*) | Done | 2026-09-11 |
 | P14 | Greenfield deployment (`DEP.*`) collectors that read the P13 `Deployment` section (see *P14*) | In progress | 2026-09-11 |
 | P14.1 | `DEP.TGT-01` target server prerequisite readiness, `Config/PrereqTable.psd1` and `-PrereqTablePath` | In progress - green over mocks; first real run is P14.7 | 2026-09-11 |
-| P14.2 | `DEP.NET-01` port reachability probed from each target server outward | Planned | |
+| P14.2 | `DEP.NET-01` port reachability probed from each target server outward, `Config/PortMatrix.psd1` and `-PortMatrixPath` | In progress - green over mocks; first real run is P14.8 | 2026-09-11 |
 | P14.3 | `DEP.WIT-01` file share witness prerequisites | Planned | |
 | P14.4 | `DEP.NAME-01` name and DNS availability for the planned names | Planned | |
 | P14.5 | `DEP.VOL-01` database and log volume checks on the target servers (`DatabaseVolume`, `LogVolume`) | Planned | |
 | P14.6 | `DEP-01` greenfield roll-up, declaring `DEP.TGT-01` and the other `DEP.*` controls in `Requires` | Planned | |
 | P14.7 | First run of `DEP.TGT-01` against real target servers - owner: Carlos Annes (operator) | Planned | |
+| P14.8 | First run of `DEP.NET-01` from real target servers over a real network path - owner: Carlos Annes (operator) | Planned | |
 | P15 | Generate the P13 deployment config from an approval table | Planned | |
 | P16 | Test debt reported by P13: the comment-based help guard names one function, so it cannot catch the next export added without help, and the twelve older exports have none; and nothing runs the suite under Windows PowerShell 5.1 (see *P16*) | Planned | |
 
@@ -272,10 +273,34 @@ naming its cause, that the uninstall-key reading finds the Visual C++ 2012 and U
 names in the table, that `Get-WindowsFeature` returns `InstallState` over WinRM, and that the
 volume holding `%ProgramFiles%` is matched. Record what differs from the mocks.
 
-**P14.2 to P14.6** are the remaining `DEP.*` controls. `DEP.NET-01` is next: probing ports from the
-target outward is a different execution model and does not belong in `DEP.TGT-01`. `DEP.VOL-01`
-is added so that the checks the template promises for `DatabaseVolume` and `LogVolume` are owned
-rather than implied.
+**P14.2 `DEP.NET-01` — In progress 2026-09-11.** A reachability result is about one source reaching
+one destination, so every probe runs on the target over WinRM, and every result names the target
+it was sent to and the host name the target reported while it ran. Flows come from
+`Config/PortMatrix.psd1` (twenty, each with its Learn URL and read date, `-PortMatrixPath` to
+override); domain controllers from the directory, the witness and peers from the `Deployment`
+section, DNS servers from the target's own configuration. A target WinRM cannot reach is `Unknown`
+on every flow and is never probed from the assessment host instead. A timeout is `Unknown`, never
+`Closed`; a `Closed` flow is reported, not judged. One port is `$null` - the WMI flow the DAG uses to
+create the witness share, which Learn names without a port - and that flow is measured and stays
+`Unknown`. Exchange's broader rule, unrestricted traffic to domain controllers and between Exchange
+servers including the dynamic RPC range, cannot be proven by probing fixed ports, and the control
+says so rather than implying it.
+
+Built and green on the dev VM against mocks, plus direct execution of the probe scriptblock against
+loopback listeners under 7.6 and 5.1. That says the probe runs and the mapping holds, and nothing
+about a network path between real servers; the phase stays In progress until P14.8.
+
+**P14.8 — first real run of `DEP.NET-01`. Owner: Carlos Annes (operator).** From a host that reaches
+at least two real, sanitised target servers over WinRM, with a filled deployment config naming them
+and a witness: run `Invoke-ExchAssess.ps1` and confirm that each result's `ProbeOrigin` is the
+target's own host name (`OriginCheck` Match), that the domain controllers probed are the directory's
+and the DNS servers the target's own, that a refused port reads `Closed` and a filtered one `Unknown`
+with cause `timeout`, how long a refusal takes against the 5000 ms default, what the `WitnessWmi`
+measurement records inside a WinRM session with no delegation, and how long the run takes against
+the forest's number of domain controllers. Record what differs from the mocks.
+
+**P14.3 to P14.6** are the remaining `DEP.*` controls. `DEP.VOL-01` is added so that the checks the
+template promises for `DatabaseVolume` and `LogVolume` are owned rather than implied.
 
 ### P16 — Test debt reported by P13
 

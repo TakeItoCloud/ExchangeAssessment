@@ -1416,6 +1416,410 @@ Describe 'ExchangeAssessment' {
         }
     }
 
+    Context 'Target port matrix (DEP.NET-01)' {
+
+        BeforeAll {
+            Import-Module -Name $script:ManifestPath -Force -ErrorAction Stop
+
+            $script:PortMatrixFile = Join-Path -Path $script:ToolRoot -ChildPath 'Config/PortMatrix.psd1'
+            $script:NetCollectorFile = Join-Path -Path $script:CollectorRoot -ChildPath 'DEP.NET-01.TargetPortMatrix.ps1'
+
+            # How many flows the matrix declares, written here rather than read from the module, so a
+            # flow dropped from the file or from the probes turns this context red.
+            $script:DeclaredFlowCount = 20
+
+            $script:PortMatrixData = Import-PowerShellDataFile -Path $script:PortMatrixFile
+
+            # A synthetic run. Every host name sits under the reserved .test top-level domain
+            # (RFC 2606) and every address in TEST-NET-1 (RFC 5737): nothing here is a real host.
+            function New-TestNetRun {
+                param([object[]]$Targets = @(), [string]$Witness = 'fsw01.example.test', [string]$PortMatrixPath = '', [switch]$NoDeployment)
+                $folder = Join-Path -Path $TestDrive -ChildPath ('run-' + [guid]::NewGuid())
+                New-Item -ItemType Directory -Path (Join-Path -Path $folder -ChildPath 'evidence') -Force | Out-Null
+                $config = if ($NoDeployment) { @{} } else { @{ Deployment = @{ TargetServers = $Targets; WitnessServer = $Witness } } }
+                [pscustomobject]@{
+                    RunId = 'test'; TenantHint = 'test'; RunFolder = $folder
+                    LogPath = (Join-Path -Path $folder -ChildPath 'run.jsonl'); ConfigPath = ''
+                    Config = $config; Flags = @{}; PortMatrixPath = $PortMatrixPath
+                    Errors = (New-Object System.Collections.Generic.List[object])
+                }
+            }
+
+            # What the probe returns when it runs on a target, built from the requests that target
+            # was handed. Every flow succeeds unless the scenario says otherwise, the target reports its
+            # own host name, and every DNS flow goes to the DNS server the target reports.
+            function New-TestProbeReading {
+                param([string]$ComputerName, [object[]]$Requests)
+                $origin = if ($script:NetScenario.ContainsKey('Origin')) { $script:NetScenario.Origin } else { ($ComputerName -split '\.')[0].ToUpperInvariant() }
+                $dns = @('192.0.2.53')
+                $results = foreach ($request in @($Requests)) {
+                    $destinations = if ($request['DestinationRole'] -eq 'DnsServer') { $dns } else { @($request['Destination']) }
+                    foreach ($destination in $destinations) {
+                        $status = switch ($request['Probe']) { 'WmiConnect' { 'Measured' } 'TcpConnect' { 'Connected' } default { 'Answered' } }
+                        if ($script:NetScenario.ContainsKey('Status') -and $script:NetScenario.Status.ContainsKey($request['FlowId'])) { $status = $script:NetScenario.Status[$request['FlowId']] }
+                        [pscustomobject]@{
+                            Key = $request['Key']; Destination = $destination; DestinationAddress = '192.0.2.20'; Status = $status
+                            Detail = 'test'; LocalAddress = '192.0.2.10:50000'; ElapsedMs = 1; ObservedRemotePorts = 'remote ports 135'
+                        }
+                    }
+                }
+                [pscustomobject]@{ OriginHost = $origin; DnsServers = $dns; DnsError = ''; TimeoutMilliseconds = 3000; Results = @($results) }
+            }
+
+            function Invoke-TestNet {
+                param($Run)
+                & (Get-Module $script:ModuleName) { param($r) Invoke-ExchCollector_DEP_NET_01_TargetPortMatrix -Run $r } $Run
+            }
+
+            $script:NetScenario = @{}
+            $script:NetRequests = @{}
+
+            # Every remote call is mocked: the target's name, the WinRM call that runs the probe on the
+            # target, and the directory the domain controllers come from.
+            Mock -ModuleName $script:ModuleName Resolve-ExchTargetName {
+                if (@($script:NetScenario.Unresolvable) -contains $Name) { return [pscustomobject]@{ Resolved = $false; Addresses = @(); Error = 'No such host is known (test)' } }
+                [pscustomobject]@{ Resolved = $true; Addresses = @('192.0.2.10'); Error = '' }
+            }
+            Mock -ModuleName $script:ModuleName Invoke-ExchTargetCommand {
+                if (@($script:NetScenario.WinRmDown) -contains $ComputerName) { throw "WinRM connection to $ComputerName refused (test)" }
+                $requests = @($ArgumentList[0])
+                $script:NetRequests[$ComputerName] = $requests
+                New-TestProbeReading -ComputerName $ComputerName -Requests $requests
+            }
+            Mock -ModuleName $script:ModuleName Get-ExchDirectoryDomainController {
+                if ($script:NetScenario.DirectoryFails) { throw 'the directory could not be read (test)' }
+                [pscustomobject]@{
+                    Controllers = @(
+                        [pscustomobject]@{ HostName = 'dc01.example.test'; Domain = 'example.test'; Site = 'Site1'; IsGlobalCatalog = $true }
+                        [pscustomobject]@{ HostName = 'dc02.example.test'; Domain = 'example.test'; Site = 'Site2'; IsGlobalCatalog = $false }
+                    )
+                    Errors = @()
+                }
+            }
+        }
+
+        BeforeEach {
+            $script:NetScenario = @{}
+            $script:NetRequests = @{}
+        }
+
+        It 'registers DEP.NET-01 as a well-formed row whose function resolves, under the existing switch and category' {
+            $registry = & (Get-Module $script:ModuleName) { Get-ExchCollectorRegistry }
+            $rows = @($registry | Where-Object { $_.Id -eq 'DEP.NET-01' })
+            $rows.Count | Should -Be 1
+
+            $row = $rows[0]
+            $row.Function | Should -Be 'Invoke-ExchCollector_DEP_NET_01_TargetPortMatrix'
+            $row.Area | Should -Be 'Deployment'
+            @($row.Requires).Count | Should -Be 0
+            $row.Cloud | Should -BeFalse
+            $row.SkipFlag | Should -Be 'SkipDeploymentChecks'
+
+            $command = & (Get-Module $script:ModuleName) { param($n) Get-Command -Name $n -CommandType Function -ErrorAction SilentlyContinue } $row.Function
+            $command | Should -Not -BeNullOrEmpty -Because 'the registry row must name a function the module defines'
+            $command.Parameters.Keys | Should -Contain 'Run'
+
+            # The existing switch is reused, not a second one added.
+            $switches = @((Get-Command -Name 'Invoke-ExchCollection' -Module $script:ModuleName).Parameters.Keys | Where-Object { $_ -like 'Skip*' })
+            $switches | Should -Contain $row.SkipFlag
+            @($switches | Where-Object { $_ -like '*Deployment*' }).Count | Should -Be 1
+
+            # The report category is the one DEP.TGT-01 uses, so the ValidateSet did not grow.
+            $control = & (Get-Module $script:ModuleName) { Get-ExchControlById -ControlId 'DEP.NET-01' }
+            $existing = & (Get-Module $script:ModuleName) { Get-ExchControlById -ControlId 'DEP.TGT-01' }
+            $control.domain | Should -Be $existing.domain
+        }
+
+        It 'reports exactly one Unknown finding carrying the three P13 strings when no target server was supplied, and contacts nothing' {
+            $template = & (Get-Module $script:ModuleName) { Get-ExchDeploymentTemplatePath }
+
+            foreach ($run in @((New-TestNetRun -NoDeployment), (New-TestNetRun -Targets @()), (New-TestNetRun -Targets @('', '   ')))) {
+                $result = Invoke-TestNet -Run $run
+                @($result.findings).Count | Should -Be 1
+                @($result.sections).Count | Should -Be 0
+
+                $finding = $result.findings[0]
+                $finding.controlId | Should -Be 'DEP.NET-01'
+                $finding.result.outcome | Should -Be 'Unknown'
+                $rationale = $finding.result.rationale
+                $rationale.Contains($template) | Should -BeTrue -Because "the rationale must carry the template path $template"
+                $rationale.Contains('New-ExchDeploymentConfig -Path .\Deployment.psd1') | Should -BeTrue
+                $rationale.Contains('-ConfigPath .\Deployment.psd1') | Should -BeTrue
+            }
+
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Resolve-ExchTargetName -Times 0 -Exactly
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Invoke-ExchTargetCommand -Times 0 -Exactly
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Get-ExchDirectoryDomainController -Times 0 -Exactly
+        }
+
+        It 'reports every flow of a target WinRM cannot reach as Unknown naming the mechanism and the error, and leaves the other target alone' {
+            $script:NetScenario = @{ WinRmDown = @('mbx02.example.test'); Unresolvable = @('typo01.example.test') }
+            $result = Invoke-TestNet -Run (New-TestNetRun -Targets @('mbx01.example.test', 'mbx02.example.test', 'typo01.example.test'))
+            $metrics = $result.findings[0].result.metrics
+            $rows = @($metrics.flows)
+
+            $down = @($rows | Where-Object { $_.Source -eq 'mbx02.example.test' })
+            $down.Count | Should -BeGreaterOrEqual $script:DeclaredFlowCount
+            foreach ($row in $down) {
+                $row.Outcome | Should -Be 'Unknown' -Because "$($row.FlowId) was never probed from mbx02"
+                $row.Cause | Should -Match 'WinRM \(Invoke-Command\) to mbx02\.example\.test failed: WinRM connection to mbx02\.example\.test refused \(test\)'
+                $row.ProbeOrigin | Should -BeNullOrEmpty -Because 'no probe ran, so there is no origin to report'
+            }
+
+            $typo = @($rows | Where-Object { $_.Source -eq 'typo01.example.test' })
+            $typo.Count | Should -BeGreaterOrEqual $script:DeclaredFlowCount
+            foreach ($row in $typo) {
+                $row.Outcome | Should -Be 'Unknown'
+                $row.Cause | Should -Match 'typo01\.example\.test does not resolve'
+            }
+
+            $up = @($rows | Where-Object { $_.Source -eq 'mbx01.example.test' })
+            foreach ($row in @($up | Where-Object { $_.Probe -ne 'WmiConnect' })) {
+                $row.Outcome | Should -Be 'Open' -Because "mbx01 answered WinRM and $($row.FlowId) succeeded there"
+            }
+
+            # The target is the only probe path: two targets were asked, the one that does not resolve
+            # was not, and nothing else was.
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Invoke-ExchTargetCommand -Times 2 -Exactly
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Invoke-ExchTargetCommand -Times 0 -Exactly -ParameterFilter { $ComputerName -eq 'typo01.example.test' }
+
+            @($metrics.perTarget | Where-Object { $_.Server -eq 'mbx02.example.test' })[0].Status | Should -Be 'WinRmFailed'
+            $result.findings[0].result.rationale | Should -Match 'did not answer WinRM'
+            $result.findings[0].result.outcome | Should -Not -Be 'Compliant'
+        }
+
+        It 'has no local-probe fallback: every network primitive sits inside the probe, and only Invoke-ExchTargetCommand receives it' {
+            $tokens = $null
+            $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:NetCollectorFile, [ref]$tokens, [ref]$errors)
+            $errors | Should -BeNullOrEmpty
+
+            $probeFunction = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-ExchPortProbeScript' }, $true)
+            $probeFunction | Should -Not -BeNullOrEmpty
+            $probe = $probeFunction.Body.Find({ param($n) $n -is [System.Management.Automation.Language.ScriptBlockExpressionAst] }, $true)
+            $probe | Should -Not -BeNullOrEmpty
+            $start = $probe.Extent.StartOffset
+            $end = $probe.Extent.EndOffset
+
+            # The declared population: the network primitives a probe is made of. Each one must be
+            # found - so the scan is known to have read the probe - and every occurrence must be inside it.
+            $population = @('System.Net.Sockets.TcpClient', 'System.Net.Sockets.UdpClient', 'System.Management.ManagementScope',
+                'System.Net.Dns', 'Get-NetTCPConnection', 'Get-DnsClientServerAddress')
+            $nodes = @($ast.FindAll({ param($n)
+                $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -or
+                $n -is [System.Management.Automation.Language.TypeExpressionAst] -or
+                $n -is [System.Management.Automation.Language.CommandAst] }, $true))
+            foreach ($primitive in $population) {
+                $hits = @($nodes | Where-Object {
+                    ($_ -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $_.Value -eq $primitive) -or
+                    ($_ -is [System.Management.Automation.Language.TypeExpressionAst] -and $_.TypeName.FullName -eq $primitive) -or
+                    ($_ -is [System.Management.Automation.Language.CommandAst] -and $_.GetCommandName() -eq $primitive) })
+                $hits.Count | Should -BeGreaterThan 0 -Because "the scan must find $primitive, or it has not read the probe"
+                foreach ($hit in $hits) {
+                    ($hit.Extent.StartOffset -ge $start -and $hit.Extent.EndOffset -le $end) | Should -BeTrue -Because "$primitive at line $($hit.Extent.StartLineNumber) is outside the probe that runs on the target"
+                }
+            }
+
+            # The probe is reached once, as the -ScriptBlock of Invoke-ExchTargetCommand.
+            $references = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Get-ExchPortProbeScript' }, $true))
+            $references.Count | Should -Be 1
+            $invoke = $references[0].Parent
+            while ($null -ne $invoke -and -not ($invoke -is [System.Management.Automation.Language.CommandAst])) { $invoke = $invoke.Parent }
+            $invoke.GetCommandName() | Should -Be 'Invoke-ExchTargetCommand'
+            $elements = @($invoke.CommandElements)
+            $position = @(0..($elements.Count - 1) | Where-Object { $elements[$_].Extent.StartOffset -le $references[0].Extent.StartOffset -and $elements[$_].Extent.EndOffset -ge $references[0].Extent.EndOffset })[0]
+            $elements[$position - 1].ParameterName | Should -Be 'ScriptBlock'
+
+            # Outside the probe nothing runs a scriptblock, and nothing tests the network by itself.
+            $invocations = @($ast.FindAll({ param($n)
+                ($n -is [System.Management.Automation.Language.CommandAst] -and $n.InvocationOperator -ne [System.Management.Automation.Language.TokenKind]::Unknown) -or
+                ($n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and @('Invoke', 'InvokeReturnAsIs', 'BeginInvoke') -contains $n.Member.Extent.Text) }, $true) |
+                Where-Object { -not ($_.Extent.StartOffset -ge $start -and $_.Extent.EndOffset -le $end) } | ForEach-Object { $_.Extent.Text })
+            $invocations | Should -BeNullOrEmpty -Because 'a scriptblock run on the assessment host would be a probe from the wrong source'
+
+            $forbidden = @('Invoke-Command', 'Test-NetConnection', 'Test-Connection', 'Resolve-DnsName', 'Invoke-WebRequest', 'Invoke-RestMethod', 'Get-CimInstance', 'New-CimSession', 'Get-WmiObject')
+            $calls = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
+                Where-Object { $forbidden -contains $_.GetCommandName() } | ForEach-Object { $_.Extent.Text })
+            $calls | Should -BeNullOrEmpty -Because 'remote calls go through the wrappers the tests replace'
+        }
+
+        It 'reports the witness flows Unknown naming Deployment.WitnessServer when it is empty, and still probes every domain controller flow' {
+            $targets = @('mbx01.example.test', 'mbx02.example.test')
+            $result = Invoke-TestNet -Run (New-TestNetRun -Targets $targets -Witness '')
+            $rows = @($result.findings[0].result.metrics.flows)
+
+            $witnessFlows = @($script:PortMatrixData.Flows | Where-Object { $_.DestinationRole -eq 'WitnessServer' })
+            $witnessFlows.Count | Should -BeGreaterThan 0
+            $witnessRows = @($rows | Where-Object { $_.DestinationRole -eq 'WitnessServer' })
+            $witnessRows.Count | Should -Be ($witnessFlows.Count * $targets.Count)
+            foreach ($row in $witnessRows) {
+                $row.Outcome | Should -Be 'Unknown'
+                $row.Cause | Should -Match 'Deployment\.WitnessServer is empty'
+                $row.ProbeOrigin | Should -BeNullOrEmpty
+            }
+            foreach ($target in $targets) {
+                @($script:NetRequests[$target] | Where-Object { $_['DestinationRole'] -eq 'WitnessServer' }).Count | Should -Be 0 -Because 'there was no witness to send'
+            }
+
+            $dcFlowIds = @($script:PortMatrixData.Flows | Where-Object { $_.DestinationRole -eq 'DomainController' } | ForEach-Object { $_.Id })
+            $dcRows = @($rows | Where-Object { $_.DestinationRole -eq 'DomainController' })
+            Compare-Object -ReferenceObject $dcFlowIds -DifferenceObject @($dcRows | ForEach-Object { $_.FlowId } | Sort-Object -Unique) | Should -BeNullOrEmpty
+            foreach ($row in $dcRows) {
+                $row.Outcome | Should -Be 'Open' -Because 'a missing witness must not suppress the domain controller flows'
+                $row.ProbeOrigin | Should -Not -BeNullOrEmpty
+            }
+            $result.findings[0].result.rationale | Should -Match 'Deployment\.WitnessServer is empty'
+        }
+
+        It 'reports a timeout as Unknown with cause timeout, never Closed, and only a refusal as Closed' {
+            $script:NetScenario = @{ Status = @{ DcLdapTcp = 'Timeout'; DcKerberosUdp = 'Timeout'; DcSmb = 'Refused' } }
+            $result = Invoke-TestNet -Run (New-TestNetRun -Targets @('mbx01.example.test', 'mbx02.example.test'))
+            $finding = $result.findings[0]
+            $rows = @($finding.result.metrics.flows)
+
+            foreach ($flowId in @('DcLdapTcp', 'DcKerberosUdp')) {
+                $timedOut = @($rows | Where-Object { $_.FlowId -eq $flowId })
+                $timedOut.Count | Should -BeGreaterThan 0
+                foreach ($row in $timedOut) {
+                    $row.Outcome | Should -Be 'Unknown' -Because 'a timeout is not a refusal'
+                    $row.Cause | Should -Match '^timeout'
+                }
+            }
+
+            $refused = @($rows | Where-Object { $_.FlowId -eq 'DcSmb' })
+            $refused.Count | Should -BeGreaterThan 0
+            foreach ($row in $refused) { $row.Outcome | Should -Be 'Closed' }
+            @($rows | Where-Object { $_.Outcome -eq 'Closed' }).Count | Should -Be $refused.Count -Because 'nothing but the refusal is Closed'
+
+            $finding.result.rationale | Should -Match 'reported, not judged'
+            $finding.result.rationale | Should -Not -Match 'misconfigur'
+        }
+
+        It 'hands all 20 flows declared in PortMatrix.psd1 to every target, and every result names its source and the origin measured on the target' {
+            # Counted from the file's text, not the parsed table, so the count cannot agree with itself.
+            $text = Get-Content -LiteralPath $script:PortMatrixFile -Raw
+            $block = [regex]::Match($text, '(?ms)^[ ]{4}Flows[ ]*=[ ]*@\((?<body>.*)^[ ]{4}\)')
+            $block.Success | Should -BeTrue -Because 'the matrix must carry a Flows = @( ... ) block'
+            $textIds = @([regex]::Matches($block.Groups['body'].Value, "(?m)^[ ]{12}Id[ ]*=[ ]*'(?<id>[^']+)'") | ForEach-Object { $_.Groups['id'].Value })
+
+            $textIds.Count | Should -Be $script:DeclaredFlowCount
+            @($textIds | Sort-Object -Unique).Count | Should -Be $textIds.Count -Because 'every flow id is unique'
+            Compare-Object -ReferenceObject $textIds -DifferenceObject @($script:PortMatrixData.Flows | ForEach-Object { $_.Id }) | Should -BeNullOrEmpty
+
+            $targets = @('mbx01.example.test', 'mbx02.example.test')
+            $result = Invoke-TestNet -Run (New-TestNetRun -Targets $targets)
+            $metrics = $result.findings[0].result.metrics
+
+            foreach ($target in $targets) {
+                $sent = @($script:NetRequests[$target] | ForEach-Object { $_['FlowId'] } | Sort-Object -Unique)
+                $sent.Count | Should -Be $textIds.Count -Because "every flow must be handed to $target, not only some"
+                Compare-Object -ReferenceObject $textIds -DifferenceObject $sent | Should -BeNullOrEmpty
+            }
+            @($metrics.probedFlowIds).Count | Should -Be $textIds.Count
+            $metrics.flowsInMatrix | Should -Be $script:DeclaredFlowCount
+
+            $rows = @($metrics.flows)
+            Compare-Object -ReferenceObject $textIds -DifferenceObject @($rows | ForEach-Object { $_.FlowId } | Sort-Object -Unique) | Should -BeNullOrEmpty
+            foreach ($row in $rows) {
+                $row.Source | Should -BeIn $targets -Because 'every result names the target it was sent to'
+                $row.ProbeOrigin | Should -Be (($row.Source -split '\.')[0].ToUpperInvariant()) -Because 'the origin is what the target reported while the probe ran'
+                $row.ProbeOriginAddress | Should -Be '192.0.2.10:50000'
+                $row.Destination | Should -Not -BeNullOrEmpty
+                $row.Protocol | Should -Not -BeNullOrEmpty
+                $row.Outcome | Should -BeIn @('Open', 'Closed', 'Unknown')
+            }
+
+            # Domain controllers are the directory's, global catalog ports go only to global catalogs,
+            # peers are the other target, and DNS servers are the ones the target itself reported.
+            @($rows | Where-Object { $_.DestinationRole -eq 'DomainController' } | ForEach-Object { $_.Destination } | Sort-Object -Unique) | Should -Be @('dc01.example.test', 'dc02.example.test')
+            @($rows | Where-Object { $_.FlowId -like 'DcGlobalCatalog*' -and $_.Destination -eq 'dc02.example.test' }).Count | Should -Be 0
+            @($rows | Where-Object { $_.Source -eq 'mbx01.example.test' -and $_.DestinationRole -eq 'PeerTarget' } | ForEach-Object { $_.Destination } | Sort-Object -Unique) | Should -Be @('mbx02.example.test')
+            @($rows | Where-Object { $_.DestinationRole -eq 'DnsServer' } | ForEach-Object { $_.Destination } | Sort-Object -Unique) | Should -Be @('192.0.2.53')
+
+            $section = @($result.sections | Where-Object { $_.key -eq 'deployment.target-port-flows' })[0]
+            $section.totalRows | Should -Be $rows.Count
+        }
+
+        It 'reports a $null port as Unknown, never a pass, where the same flow with its port is Open' {
+            $shipped = Invoke-TestNet -Run (New-TestNetRun -Targets @('mbx01.example.test'))
+            $shippedRows = @($shipped.findings[0].result.metrics.flows)
+            foreach ($row in @($shippedRows | Where-Object { $_.FlowId -eq 'DcLdapSsl' })) { $row.Outcome | Should -Be 'Open' }
+
+            # The shipped table's one $null port is the WMI witness flow. It is measured, and stays Unknown.
+            @($script:PortMatrixData.Flows | Where-Object { $null -eq $_.Port } | ForEach-Object { $_.Id }) | Should -Be @('WitnessWmi')
+            $wmi = @($shippedRows | Where-Object { $_.FlowId -eq 'WitnessWmi' })
+            $wmi.Count | Should -Be 1
+            $wmi[0].Outcome | Should -Be 'Unknown'
+            $wmi[0].Cause | Should -Match '^No Learn-documented port'
+            $wmi[0].Measured | Should -Match 'remote ports 135' -Because 'what the target measured is still reported'
+
+            $copy = Join-Path -Path $TestDrive -ChildPath 'PortMatrix.null.psd1'
+            $text = Get-Content -LiteralPath $script:PortMatrixFile -Raw
+            $nulled = [regex]::Replace($text, "(?ms)(Id\s*=\s*'DcLdapSsl'.*?Port\s*=\s*)636", '${1}$null')
+            $nulled | Should -Not -Be $text -Because 'the copy must actually null the port'
+            Set-Content -LiteralPath $copy -Value $nulled
+
+            $result = Invoke-TestNet -Run (New-TestNetRun -Targets @('mbx01.example.test') -PortMatrixPath $copy)
+            $rows = @($result.findings[0].result.metrics.flows | Where-Object { $_.FlowId -eq 'DcLdapSsl' })
+            $rows.Count | Should -BeGreaterThan 0
+            foreach ($row in $rows) {
+                $row.Outcome | Should -Be 'Unknown'
+                $row.Cause | Should -Match '^No Learn-documented port'
+            }
+            $result.findings[0].result.metrics.portMatrixPath | Should -Be $copy
+            $result.findings[0].result.outcome | Should -Not -Be 'Compliant'
+        }
+
+        It 'takes domain controllers only from the directory, and a directory it cannot read costs only their flows' {
+            $script:NetScenario = @{ DirectoryFails = $true }
+            $result = Invoke-TestNet -Run (New-TestNetRun -Targets @('mbx01.example.test', 'mbx02.example.test'))
+            $rows = @($result.findings[0].result.metrics.flows)
+
+            $dcRows = @($rows | Where-Object { $_.DestinationRole -eq 'DomainController' })
+            $dcRows.Count | Should -BeGreaterThan 0
+            foreach ($row in $dcRows) {
+                $row.Outcome | Should -Be 'Unknown'
+                $row.Cause | Should -Match 'the directory could not be read \(test\)'
+            }
+            foreach ($row in @($rows | Where-Object { $_.DestinationRole -ne 'DomainController' -and $_.Probe -ne 'WmiConnect' })) {
+                $row.Outcome | Should -Be 'Open' -Because "$($row.FlowId) does not depend on the directory"
+            }
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Get-ExchDirectoryDomainController -Times 1 -Exactly
+            $result.findings[0].result.rationale | Should -Match 'never supplied or guessed'
+        }
+
+        It 'records a Learn URL and a read date for every flow, and loads the matrix the way the prerequisite table loads' {
+            [datetime]::ParseExact([string]$script:PortMatrixData.TableAsOf, 'yyyy-MM-dd', [cultureinfo]::InvariantCulture) | Should -BeOfType [datetime]
+
+            foreach ($flow in $script:PortMatrixData.Flows) {
+                foreach ($key in @('Id', 'SourceRole', 'DestinationRole', 'Port', 'Protocol', 'Probe', 'Purpose', 'Source', 'Read')) {
+                    $flow.Contains($key) | Should -BeTrue -Because "$($flow.Id) must state $key, even if it is `$null"
+                }
+                $flow.SourceRole | Should -Be 'TargetServer'
+                $flow.DestinationRole | Should -BeIn @('DomainController', 'WitnessServer', 'PeerTarget', 'DnsServer')
+                $flow.Protocol | Should -BeIn @('TCP', 'UDP')
+                $sources = @($flow.Source | Where-Object { $_ })
+                $sources.Count | Should -BeGreaterThan 0 -Because "$($flow.Id) must name its source"
+                foreach ($source in $sources) { $source | Should -Match '^https://learn\.microsoft\.com/' -Because "$($flow.Id) must be sourced from Microsoft Learn" }
+                { [datetime]::ParseExact([string]$flow.Read, 'yyyy-MM-dd', [cultureinfo]::InvariantCulture) } | Should -Not -Throw -Because "$($flow.Id) must carry the date it was read"
+                if ($null -eq $flow.Port) { [string]$flow.Note | Should -Not -BeNullOrEmpty -Because "$($flow.Id) has no port and must say why" }
+            }
+
+            $missing = Join-Path -Path $TestDrive -ChildPath 'no-such-port-matrix.psd1'
+            { New-ExchRun -OutputRoot (Join-Path -Path $TestDrive -ChildPath 'out') -PortMatrixPath $missing } | Should -Throw -ExpectedMessage '*PortMatrixPath not found*'
+            { & (Get-Module $script:ModuleName) { param($p) Get-ExchPortMatrix -Path $p } $missing } | Should -Throw -ExpectedMessage '*not found*'
+
+            $override = & (Get-Module $script:ModuleName) { Get-ExchPortMatrixPath -Run ([pscustomobject]@{ PortMatrixPath = 'X:\override.psd1' }) }
+            $override | Should -Be 'X:\override.psd1'
+            $default = & (Get-Module $script:ModuleName) { Get-ExchPortMatrixPath -Run ([pscustomobject]@{ PortMatrixPath = '' }) }
+            [System.IO.Path]::GetFullPath($default) | Should -Be ([System.IO.Path]::GetFullPath($script:PortMatrixFile))
+
+            $matrix = & (Get-Module $script:ModuleName) { Get-ExchPortMatrix }
+            $matrix.TableAsOf | Should -BeOfType [datetime]
+            @($matrix.Flows).Count | Should -Be $script:DeclaredFlowCount
+        }
+    }
+
     Context 'Static analysis' {
 
         It 'reports no PSScriptAnalyzer findings for the repository' {

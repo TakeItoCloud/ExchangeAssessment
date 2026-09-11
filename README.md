@@ -6,12 +6,12 @@ ExchangeAssessment reads an on-premises or hybrid Exchange organisation and repo
 the **configuration** it found, and the **problems** in that configuration. It is read-only —
 every collector reads, and the only writes are into the local run folder.
 
-A run drives 33 collectors across the whole organisation - servers, Active Directory, Exchange
+A run drives 34 collectors across the whole organisation - servers, Active Directory, Exchange
 version and patch state, databases, DAG and replication, transport configuration, connectors and
 queues, certificates, TLS, anti-malware, RBAC, mailboxes, retention and audit, client access,
 public folders, address lists, hybrid, identity sync, DNS posture and event logs, and the
-prerequisites of the member servers named for a greenfield deployment - plus, on request, the
-Exchange Online side of a hybrid organisation. It then writes:
+prerequisites and network reachability of the member servers named for a greenfield deployment -
+plus, on request, the Exchange Online side of a hybrid organisation. It then writes:
 
 - **`csv/`** — one CSV per configuration area, plus `csv/findings.csv`. The complete record.
 - **`assessment.json`** — the whole assessment in one file: configuration inventory, findings
@@ -55,6 +55,7 @@ Extracted from `infra-scripting-suite/powershell/Assessments/ExchangeAssessment`
 | `PTCH-01` | Security update currency, Emergency Mitigation Service, Windows patch cycle |
 | `DNS-01` | MX, SPF and DMARC for every authoritative accepted domain |
 | `DEP.TGT-01` | Greenfield deployment: Exchange Server SE prerequisites on the member servers named in `Deployment.TargetServers` - see *Planning a new deployment* |
+| `DEP.NET-01` | Greenfield deployment: network reachability probed **from** each server in `Deployment.TargetServers` to the domain controllers, the witness, the other targets and its DNS servers - see *Planning a new deployment* |
 
 Four more run only with `-IncludeExchangeOnline`:
 
@@ -98,7 +99,7 @@ View-Only Organization Management in Exchange plus domain read covers most colle
 event log and anti-malware exclusion collectors need local administrative rights on the
 Exchange servers.
 
-Two controls need a little more, and say so in their output rather than failing:
+Four controls need a little more, and say so in their output rather than failing:
 
 - **`TR.CO-01`** runs `Get-ADPermission` against each receive connector to find out whether an
   anonymous principal actually holds `ms-Exch-SMTP-Accept-Any-Recipient` — the permission that
@@ -113,6 +114,13 @@ Two controls need a little more, and say so in their output rather than failing:
   (`Invoke-Command`), so the account needs rights to query both on those servers. A mechanism it
   cannot use makes the checks that need it `Unknown`, naming the mechanism and the error; the
   checks the other mechanism answered still stand.
+- **`DEP.NET-01`** runs its probes **on** each server named in `Deployment.TargetServers`, over
+  WinRM, and reads the domain controllers from the directory with `Get-ADForest` and
+  `Get-ADDomainController`. A target it cannot reach over WinRM has every flow `Unknown`, naming
+  the error - it is never probed from the assessment host instead, because that would answer a
+  different question. The WMI flow to the witness runs inside that WinRM session, where the
+  operator's credentials do not pass on to a third host without delegation, so an access-denied
+  there is about authentication rather than the network; the flow stays `Unknown` either way.
 
 ## Install
 
@@ -159,6 +167,9 @@ Import-Module .\src\ExchangeAssessment\ExchangeAssessment.psd1 -Force
 
 # Judge greenfield target servers against a newer or operator-verified prerequisite table
 .\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -ConfigPath .\Deployment.psd1 -PrereqTablePath .\PrereqTable.psd1
+
+# Probe the greenfield target servers against a newer or operator-verified port matrix
+.\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -ConfigPath .\Deployment.psd1 -PortMatrixPath .\PortMatrix.psd1
 
 # Skip the greenfield deployment checks, which contact the servers named in the deployment config
 .\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -SkipDeploymentChecks
@@ -291,11 +302,35 @@ A config with some keys still empty gets a warning naming exactly those keys.
 prerequisites. It never calls `Get-ExchangeServer` and never picks a server from the directory:
 with `TargetServers` empty it reports one `Unknown` finding naming the template and both commands,
 because none was supplied - not because there are none. Each name is resolved first, so a typo
-is reported as a name that does not resolve rather than as a server that is down. The other
-greenfield controls - port reachability, witness, planned names, database and log volumes, and
-the roll-up - are [PORT-PLAN.md](PORT-PLAN.md) phase P14. A filled copy holds client host names,
-so keep it out of source control. `Deployment.psd1` is gitignored in this repository for that
-reason.
+is reported as a name that does not resolve rather than as a server that is down.
+
+`DEP.NET-01` probes network reachability **from** each of those servers, because a port that is
+open from the assessment host says nothing about the path from the server that will run Exchange.
+The probe runs on the target over WinRM, and every result names its source and the host name the
+target reported while it ran. It probes every domain controller the directory lists, the
+`WitnessServer`, the other `TargetServers` and the target's own DNS servers. With `WitnessServer`
+empty the witness flows are `Unknown` naming the key, and every other flow still runs. A timeout is
+`Unknown`, never `Closed`, and a `Closed` flow is reported rather than judged - before Exchange is
+installed nothing listens on a peer's replication port, so a refusal there is expected.
+
+The other greenfield controls - witness, planned names, database and log volumes, and the roll-up -
+are [PORT-PLAN.md](PORT-PLAN.md) phase P14. A filled copy holds client host names, so keep it out
+of source control. `Deployment.psd1` is gitignored in this repository for that reason.
+
+### Keeping the port matrix current
+
+`DEP.NET-01` probes the flows in
+[`src/ExchangeAssessment/Config/PortMatrix.psd1`](src/ExchangeAssessment/Config/PortMatrix.psd1):
+each with its source and destination role, port, protocol, probe and purpose, and the Microsoft
+Learn page and date it was read. Exchange Learn names no port list for traffic between Exchange
+servers and domain controllers - it asks for that traffic to be unrestricted on any port - so the
+domain controller flows are the Active Directory and Kerberos rows Windows Learn gives, and a target
+on which they are all `Open` has not thereby been shown to meet the broader rule. As shipped, one
+port is `$null`: the WMI flow the DAG uses to create the witness share, which Learn names without a
+port. That flow is measured - the TCP connections the WMI attempt opened are recorded - and stays
+`Unknown`. Each probe waits `PortProbe.TimeoutMilliseconds` (5000 by default) in
+`Config/Thresholds.psd1`. To probe against a different table, copy the file, change it, and pass it
+with `-PortMatrixPath`, which loads, validates and overrides as `-PrereqTablePath` does.
 
 ### Keeping the prerequisite table current
 

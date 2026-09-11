@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-09-11 (phase P14.2, `DEP.NET-01`)
+
+The second greenfield deployment control: network reachability, probed from each target server
+outward. A reachability result is a statement about one source reaching one destination. A probe
+from the host running the assessment answers the wrong question - whether that host reaches a
+domain controller, not whether the server that will become an Exchange server does - so
+`DEP.NET-01` runs every probe on the target itself, over WinRM, and every result names its source.
+
+- **`Collectors/DEP.NET-01.TargetPortMatrix.ps1`**, registered as `DEP.NET-01`, area `Deployment`,
+  no `Requires`, `Cloud = $false`, skip flag `SkipDeploymentChecks` - the existing switch, not a
+  second one. Its catalog domain is `Environment`, as `DEP.TGT-01`'s is, so the `ControlDomain`
+  ValidateSet is unchanged. Targets come from `Deployment.TargetServers` and nowhere else.
+  Destinations are discovered where they can be: domain controllers from the directory
+  (`Get-ADForest`, then `Get-ADDomainController` for each domain) - never supplied, never guessed;
+  the witness and the other targets from the P13 `Deployment` section; DNS servers from the
+  target's own DNS client configuration, read on the target. Each target's name is resolved first,
+  then one `Invoke-Command` runs the probe there. **There is no local fallback**: a target that does
+  not resolve or does not answer WinRM gets `Unknown` for every flow, naming the mechanism and the
+  error. Every result records the source, the destination and the address it resolved to on the
+  target, port, protocol, probe, outcome and cause, and the probe origin as measured on the target -
+  the host name the target reported and the local address the connection left from. A result whose
+  reported host is not the target is `Unknown`.
+- Each flow is `Open` (the handshake completed, or the server answered), `Closed` (the target was
+  told the port refused or is unreachable) or `Unknown` with its cause. **A timeout is `Unknown` with
+  cause `timeout`, never `Closed`.** A `Closed` flow is reported, not judged: it may be right for the
+  environment, and before Exchange and failover clustering are installed nothing listens on a peer's
+  replication or cluster port. It makes the control `PartiallyCompliant`, never `NonCompliant`.
+  Results roll up per target and per destination, and `metrics.flows` and
+  `csv/deployment.target-port-flows.csv` carry every one, so a network team can work from the list.
+- **`Config/PortMatrix.psd1`** - twenty flows, each with an id, source and destination role, port,
+  protocol, probe, purpose, and the Microsoft Learn URL and read date (2026-09-11). Eleven go to
+  every domain controller: Kerberos 88 TCP and UDP, RPC endpoint mapper 135, LDAP 389 TCP and DC
+  Locator 389 UDP, SMB 445, Kerberos password 464 TCP and UDP, LDAP SSL 636, and global catalog 3268
+  and 3269 to global catalogs only. Exchange Learn names no port list for Exchange-to-DC traffic - it
+  requires that traffic to be unrestricted on any port, including random RPC ports - so these are the
+  Windows Learn rows for Active Directory and the Kerberos Key Distribution Center. Two go to the
+  witness (SMB 445; WMI), five to each other target (DAG replication 64327, cluster 3343 TCP and UDP,
+  RPC endpoint mapper 135, SMB 445), and DNS 53 UDP and TCP to the target's DNS servers. **One port
+  is `$null`: `WitnessWmi`.** Learn says Exchange uses WMI to create the witness directory and share
+  and names no port, so the probe makes a WMI connection and records the TCP connections to the
+  witness it opened, and the flow stays `Unknown`. The dynamic RPC range cannot be proven by probing
+  fixed ports; it is not a flow, and the table and the remediation both say so.
+- **`-PortMatrixPath`** on `New-ExchRun` and `Invoke-ExchAssess.ps1`, and `Catalog/PortMatrix.ps1`,
+  mirroring `-PrereqTablePath` and `Catalog/PrereqTable.ps1`: the same path resolution, loading and
+  validation, and a missing, unparseable or empty matrix is an error.
+- **`PortProbe` thresholds** - `TimeoutMilliseconds` (default 5000) and `MaxConcurrent` (default 32),
+  both judgement calls. A top-level key, not under `Deployment`: that is the operator's P13 contract,
+  and a default there would make an unfilled contract look partly supplied.
+
+**Changed.** `ModuleVersion` is **0.4.0**: the set of controls changed, which the PORT-PLAN rule
+treats as a changed finding. With no deployment config every run now carries one more finding -
+`DEP.NET-01`, `Unknown`, severity Info - which says none was supplied.
+
+**Tests** — ten added (80 to 90), all against mocks and TestDrive. The registry row is well formed,
+resolves, reuses the one deployment switch and the `DEP.TGT-01` category; no target servers gives
+exactly one `Unknown` finding carrying the template path and both P13 commands, and contacts nothing;
+a target WinRM cannot reach has every flow `Unknown` naming WinRM and the error with no probe origin,
+a name that does not resolve is never contacted, and the reachable target is unaffected; an AST scan
+of the collector finds each of six declared network primitives and every one of them inside the probe
+scriptblock, finds that scriptblock reached once and only as `Invoke-ExchTargetCommand -ScriptBlock`,
+and finds no scriptblock invocation or network cmdlet outside it; an empty `WitnessServer` makes the
+witness flows `Unknown` naming the key while every domain controller flow is still probed; a timeout
+is `Unknown` with cause `timeout` and only a refusal is `Closed`; all 20 flows, counted from the
+file's text, are handed to every target and every result names its source and measured origin; a
+`$null` port is `Unknown` where the same flow with its port is `Open`; a directory that cannot be read
+costs only the domain controller flows; and the matrix loads and refuses a missing path like the
+prerequisite table.
+
+**Verified on the dev VM only.** Beyond the suite, the probe scriptblock was run directly on the dev
+VM, under PowerShell 7.6.6 and Windows PowerShell 5.1, against listeners it opened on 127.0.0.1: an
+open port read `Connected`/`Open`, a closed TCP port and a closed UDP port read `Refused`/`Closed`, the
+WMI measurement ran, and a name under `.invalid` read `NameNotResolved`. That run found two things,
+both fixed before the gate: the WMI measurement listed every connection to the address rather than
+only the ones the WMI attempt opened, and a refused loopback connection took 2091-2211 ms to report,
+which is why the default timeout is 5000 ms rather than 3000. **Not verified against a real server or
+a real network path** - that is P14.8, owned by the operator.
+
 ### Added — 2026-09-11 (phase P14.1, `DEP.TGT-01`)
 
 The first greenfield deployment control: prerequisite readiness of the member servers that will

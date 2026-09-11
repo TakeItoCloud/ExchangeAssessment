@@ -412,6 +412,21 @@ function Get-ExchControlCatalog {
             )
         }
         @{
+            controlId  = 'DEP.NET-01'
+            domain     = 'Environment'
+            title      = 'Greenfield target server network reachability'
+            target     = 'From every member server named in Deployment.TargetServers, each flow in the port matrix - to every domain controller discovered in the directory, the file share witness, the other target servers and the target''s own DNS servers - is probed on the target itself, and every result names the host it ran from.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.8.20'; note='Networks security' }
+                @{ framework='ISO27001:2022'; ref='A.5.30'; note='ICT readiness for a platform deployment' }
+            )
+            references = @(
+                @{ title='Network ports for clients and mail flow in Exchange'; url='https://learn.microsoft.com/exchange/plan-and-deploy/deployment-ref/network-ports' }
+                @{ title='Manage database availability groups in Exchange Server'; url='https://learn.microsoft.com/exchange/high-availability/manage-ha/manage-dags' }
+                @{ title='Service overview and network port requirements for Windows'; url='https://learn.microsoft.com/troubleshoot/windows-server/networking/service-overview-and-network-port-requirements' }
+            )
+        }
+        @{
             controlId  = 'CLD.ORG-01'
             domain     = 'Cloud'
             title      = 'Exchange Online organisation configuration'

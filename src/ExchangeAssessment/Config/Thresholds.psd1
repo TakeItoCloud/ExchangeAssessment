@@ -443,6 +443,24 @@ statement it says so.
     }
 
     # --------------------------------------------------------------------------------------
+    # Port probes run on the greenfield target servers (DEP.NET-01)
+    # A top-level key of its own, not under Deployment: Deployment is the operator's P13
+    # contract, and a default there would make an unfilled contract look partly supplied.
+    # --------------------------------------------------------------------------------------
+    PortProbe = @{
+        # How long one probe waits for an answer before the flow is reported Unknown with cause
+        # 'timeout'. Judgement call, not a Microsoft figure. On the dev VM a refused connection to
+        # 127.0.0.1 took 2091-2211 ms to report under Windows PowerShell 5.1 and PowerShell 7, so
+        # a shorter timeout would turn refusals into timeouts; a longer one makes each batch of
+        # filtered ports slower. A timeout is never reported as Closed - nothing answered, so
+        # nothing was refused.
+        TimeoutMilliseconds = 5000
+        # TCP probes started together on one target. Each waits out its own timeout, so a batch
+        # of filtered ports costs one timeout rather than one per port. Judgement call.
+        MaxConcurrent       = 32
+    }
+
+    # --------------------------------------------------------------------------------------
     # Reporting
     # --------------------------------------------------------------------------------------
     MaxRowsPerSection = 500
