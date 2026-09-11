@@ -52,6 +52,9 @@ param(
     # A .psd1 replacing Config/PrereqTable.psd1, for a run against a newer or operator-verified
     # reading of the Exchange Server SE prerequisites than the one shipped with the module.
     [Parameter()][string]$PrereqTablePath,
+    # A .psd1 replacing Config/PortMatrix.psd1, for a run against a newer or operator-verified
+    # reading of the network flows probed from each greenfield target server.
+    [Parameter()][string]$PortMatrixPath,
     # Skip the greenfield deployment checks, which contact the servers named in the deployment
     # config.
     [Parameter()][switch]$SkipDeploymentChecks,
@@ -79,7 +82,7 @@ try {
     Import-Module $modulePath -Force -ErrorAction Stop
 
     $run = New-ExchRun -OutputRoot $OutputRoot -TenantHint $TenantHint -ConfigPath $ConfigPath `
-        -BuildTablePath $BuildTablePath -PrereqTablePath $PrereqTablePath `
+        -BuildTablePath $BuildTablePath -PrereqTablePath $PrereqTablePath -PortMatrixPath $PortMatrixPath `
         -FullInventory:$FullInventory -IncludeExchangeOnline:$IncludeExchangeOnline `
         -CloudUserPrincipalName $CloudUserPrincipalName -CloudAppId $CloudAppId `
         -CloudCertificateThumbprint $CloudCertificateThumbprint -CloudOrganization $CloudOrganization `
