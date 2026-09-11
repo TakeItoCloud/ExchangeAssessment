@@ -68,6 +68,34 @@ Describe 'ExchangeAssessment' {
             $duplicates = $defined | Group-Object | Where-Object Count -gt 1 | ForEach-Object Name
             $duplicates | Should -BeNullOrEmpty -Because "defined more than once: $($duplicates -join ', ')"
         }
+
+        It 'documents every function added with the deployment contract' {
+            # Public functions from here on ship with full comment-based help. The earlier ones
+            # predate that and carry a file header instead; add each new export to this list.
+            $documented = @('New-ExchDeploymentConfig')
+
+            foreach ($name in $documented) {
+                $script:Exported | Should -Contain $name
+
+                $file = Join-Path -Path $script:ToolRoot -ChildPath "Public/$name.ps1"
+                $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$null)
+                $definition = $ast.Find({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+                }, $true)
+                $definition | Should -Not -BeNullOrEmpty -Because "$file must define $name"
+
+                $help = $definition.GetHelpContent()
+                $help | Should -Not -BeNullOrEmpty -Because "$name must carry comment-based help"
+                $help.Synopsis | Should -Not -BeNullOrEmpty -Because "$name needs a SYNOPSIS"
+                $help.Description | Should -Not -BeNullOrEmpty -Because "$name needs a DESCRIPTION"
+                $help.Parameters.Count | Should -BeGreaterThan 0 -Because "$name needs at least one PARAMETER"
+                foreach ($parameter in $definition.Body.ParamBlock.Parameters) {
+                    $help.Parameters.Keys | Should -Contain $parameter.Name.VariablePath.UserPath -Because "$name must document every parameter"
+                }
+                $help.Examples.Count | Should -BeGreaterOrEqual 2 -Because "$name needs at least two EXAMPLE blocks"
+            }
+        }
     }
 
     Context 'Control catalog' {
@@ -457,6 +485,24 @@ Describe 'ExchangeAssessment' {
             $closeAt | Should -BeGreaterThan $csvAt
             $closeAt | Should -BeGreaterThan $jsonAt
         }
+
+        It 'prints the deployment config warning as a delimited block and still logs every warning' {
+            # The block is keyed on the prefix Get-ExchDeploymentConfigWarning gives both of its
+            # forms; the 'Deployment config contract' tests find the warning by that same prefix.
+            $text = Get-Content -Path $script:EntryScript -Raw
+            $text | Should -Match ([regex]::Escape('Get-ExchPreflightReport -Run $run'))
+            $text | Should -Match ([regex]::Escape("`$w.StartsWith('Deployment config:')"))
+            $text | Should -Match ([regex]::Escape("Write-ExchEvent -Run `$run -Level WARN -Message 'Preflight' -Data @{ warning = `$w }"))
+        }
+
+        It 'carries a worked deployment config example in its help' {
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:EntryScript, [ref]$null, [ref]$null)
+            $help = $ast.GetHelpContent()
+            $help | Should -Not -BeNullOrEmpty -Because 'the entry script must carry comment-based help'
+
+            $worked = @($help.Examples | Where-Object { $_ -match 'New-ExchDeploymentConfig -Path' -and $_ -match '-ConfigPath' })
+            $worked.Count | Should -BeGreaterThan 0 -Because 'one example must create the config and pass it back with -ConfigPath'
+        }
     }
 
     Context 'Open relay is a permission, not a shape' {
@@ -771,6 +817,215 @@ Describe 'ExchangeAssessment' {
                 })
                 $scoped.Count | Should -BeGreaterThan 0 -Because 'every Get-Queue call must name the server it is asking'
             }
+        }
+    }
+
+    Context 'Deployment config contract' {
+
+        BeforeAll {
+            Import-Module -Name $script:ManifestPath -Force -ErrorAction Stop
+
+            $script:DeploymentTemplate = Join-Path -Path $script:ToolRoot -ChildPath 'Config/Deployment.template.psd1'
+
+            # The six keys the contract promises, written out here rather than read from the
+            # module, so the template is checked against the specification and not against
+            # itself.
+            $script:ContractKeys = @('TargetServers', 'WitnessServer', 'DagName', 'InternalNames', 'DatabaseVolume', 'LogVolume')
+
+            function Get-TestDeploymentWarning {
+                param($Run)
+                $report = Get-ExchPreflightReport -Run $Run
+                @($report.warnings | Where-Object { $_.StartsWith('Deployment config:') })
+            }
+
+            # A fully filled Deployment section. Every host name sits under the reserved .test
+            # top-level domain (RFC 2606) - nothing here came from a real organisation.
+            function New-TestFilledDeployment {
+                @{
+                    TargetServers  = @('mbx01.example.test', 'mbx02.example.test')
+                    WitnessServer  = 'fsw01.example.test'
+                    DagName        = 'DAG01'
+                    InternalNames  = @('mail.example.test', 'autodiscover.example.test')
+                    DatabaseVolume = 'D:'
+                    LogVolume      = 'L:'
+                }
+            }
+        }
+
+        It 'ships a template that parses and carries exactly the contract keys, all empty' {
+            $script:DeploymentTemplate | Should -Exist
+
+            $data = Import-PowerShellDataFile -Path $script:DeploymentTemplate
+            $data.Keys | Should -Contain 'Deployment'
+            $section = $data.Deployment
+            $section | Should -BeOfType [hashtable]
+
+            foreach ($key in $script:ContractKeys) {
+                $section.Keys | Should -Contain $key -Because "the contract promises $key"
+            }
+
+            # Count the keys a second way, from the file's text rather than the parsed table, so
+            # the count cannot agree with itself by construction and one key cannot pass for six.
+            $text = Get-Content -Path $script:DeploymentTemplate -Raw
+            $block = [regex]::Match($text, '(?ms)^[ \t]*Deployment[ \t]*=[ \t]*@\{(?<body>.*?)^[ \t]{4}\}')
+            $block.Success | Should -BeTrue -Because 'the template must carry a Deployment = @{ ... } block'
+            $counted = [regex]::Matches($block.Groups['body'].Value, '(?m)^[ \t]*[A-Za-z]\w*[ \t]*=').Count
+
+            $section.Keys.Count | Should -Be $counted
+            $counted | Should -Be $script:ContractKeys.Count
+
+            # It ships empty. A filled template would put one client's host names in the module.
+            foreach ($key in $section.Keys) {
+                @($section[$key] | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count |
+                    Should -Be 0 -Because "$key must ship empty"
+            }
+        }
+
+        It 'checks runs against the same keys the template ships' {
+            $moduleKeys = & (Get-Module $script:ModuleName) { Get-ExchDeploymentKey }
+            ($moduleKeys -join ',') | Should -Be ($script:ContractKeys -join ',')
+
+            $templateKeys = @((Import-PowerShellDataFile -Path $script:DeploymentTemplate).Deployment.Keys)
+            Compare-Object -ReferenceObject $script:ContractKeys -DifferenceObject $templateKeys | Should -BeNullOrEmpty
+        }
+
+        It 'resolves the template from the module base, and the file is there' {
+            $resolved = & (Get-Module $script:ModuleName) { Get-ExchDeploymentTemplatePath }
+            $expected = [System.IO.Path]::GetFullPath((Join-Path -Path (Get-Module $script:ModuleName).ModuleBase -ChildPath 'Config/Deployment.template.psd1'))
+
+            [System.IO.Path]::IsPathRooted($resolved) | Should -BeTrue
+            $resolved | Should -Be $expected
+            $resolved | Should -Exist
+        }
+
+        It 'writes a copy of the template that parses, and returns its resolved path' {
+            $target = Join-Path -Path $TestDrive -ChildPath 'Deployment.psd1'
+            $returned = New-ExchDeploymentConfig -Path $target
+
+            $returned | Should -Be (Resolve-Path -LiteralPath $target).ProviderPath
+            [System.IO.Path]::IsPathRooted($returned) | Should -BeTrue
+            (Import-PowerShellDataFile -Path $returned).Deployment.Keys.Count | Should -Be $script:ContractKeys.Count
+            (Get-FileHash -LiteralPath $returned).Hash | Should -Be (Get-FileHash -LiteralPath $script:DeploymentTemplate).Hash
+        }
+
+        It 'resolves a relative path against the current location' {
+            Push-Location -LiteralPath $TestDrive
+            try { $returned = New-ExchDeploymentConfig -Path 'relative.psd1' }
+            finally { Pop-Location }
+
+            $returned | Should -Be (Resolve-Path -LiteralPath (Join-Path -Path $TestDrive -ChildPath 'relative.psd1')).ProviderPath
+        }
+
+        It 'refuses to overwrite an existing file without -Force, and overwrites it with -Force' {
+            $target = Join-Path -Path $TestDrive -ChildPath 'existing.psd1'
+            Set-Content -LiteralPath $target -Value '@{ Marker = 1 }'
+
+            { New-ExchDeploymentConfig -Path $target } | Should -Throw -ExpectedMessage '*-Force*'
+            (Get-Content -LiteralPath $target -Raw) | Should -Match 'Marker' -Because 'a refused overwrite must leave the file alone'
+
+            $returned = New-ExchDeploymentConfig -Path $target -Force
+            $returned | Should -Be (Resolve-Path -LiteralPath $target).ProviderPath
+            (Get-FileHash -LiteralPath $target).Hash | Should -Be (Get-FileHash -LiteralPath $script:DeploymentTemplate).Hash
+        }
+
+        It 'writes nothing under -WhatIf' {
+            $target = Join-Path -Path $TestDrive -ChildPath 'whatif.psd1'
+            $returned = New-ExchDeploymentConfig -Path $target -WhatIf
+
+            $returned | Should -BeNullOrEmpty
+            $target | Should -Not -Exist
+        }
+
+        It 'tells the operator to keep a filled copy out of source control' {
+            $file = Join-Path -Path $script:ToolRoot -ChildPath 'Public/New-ExchDeploymentConfig.ps1'
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$null)
+            $help = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true).GetHelpContent()
+
+            $help.Notes | Should -Match 'source control'
+            $help.Outputs | Should -Match 'resolved full path'
+        }
+
+        It 'warns, without failing, when no deployment config was supplied' {
+            $warning = @(Get-TestDeploymentWarning -Run ([pscustomobject]@{ Config = @{} }))
+            $warning.Count | Should -Be 1
+
+            $text = $warning[0]
+            $template = [System.IO.Path]::GetFullPath((Join-Path -Path (Get-Module $script:ModuleName).ModuleBase -ChildPath 'Config/Deployment.template.psd1'))
+
+            $text | Should -Match 'greenfield deployment controls will report Unknown'
+            $text | Should -Match 'no target servers, witness or planned names were supplied'
+            $text.Contains($template) | Should -BeTrue -Because "the warning must carry the resolved template path $template"
+            $text | Should -Match ([regex]::Escape('New-ExchDeploymentConfig -Path '))
+            $text | Should -Match ([regex]::Escape('New-ExchRun '))
+            $text | Should -Match ([regex]::Escape('-ConfigPath '))
+        }
+
+        It 'warns the same way when called as existing callers call it, with no run' {
+            { Get-ExchPreflightReport } | Should -Not -Throw
+            @(Get-TestDeploymentWarning).Count | Should -Be 1
+        }
+
+        It 'treats the template passed back unfilled as nothing supplied' {
+            $config = & (Get-Module $script:ModuleName) { param($p) Import-ExchConfiguration -ConfigPath $p } $script:DeploymentTemplate
+            $warning = @(Get-TestDeploymentWarning -Run ([pscustomobject]@{ Config = $config }))
+
+            $warning.Count | Should -Be 1
+            $warning[0] | Should -Match 'none supplied'
+        }
+
+        It 'names exactly the missing keys of a partly filled config, and no others' {
+            $deployment = New-TestFilledDeployment
+            $deployment.WitnessServer = '   '
+            $deployment.InternalNames = @('')
+            $deployment.Remove('LogVolume')
+            $expectedMissing = @('WitnessServer', 'InternalNames', 'LogVolume')
+
+            $gap = & (Get-Module $script:ModuleName) { param($d) Get-ExchDeploymentConfigGap -Deployment $d } $deployment
+            $gap.Supplied | Should -BeTrue
+            ($gap.Missing -join ',') | Should -Be ($expectedMissing -join ',')
+
+            $warning = @(Get-TestDeploymentWarning -Run ([pscustomobject]@{ Config = @{ Deployment = $deployment } }))
+            $warning.Count | Should -Be 1
+            foreach ($key in $script:ContractKeys) {
+                $isMissing = $key -in $expectedMissing
+                ($warning[0] -cmatch "\b$key\b") | Should -Be $isMissing -Because $(if ($isMissing) { "$key is missing and must be named" } else { "$key is filled and must not be named" })
+            }
+        }
+
+        It 'accepts a filled copy of the template through the real -ConfigPath merge' {
+            # The operator's path end to end: write the copy, fill it, merge it over the
+            # thresholds the way New-ExchRun does, and ask preflight.
+            $target = New-ExchDeploymentConfig -Path (Join-Path -Path $TestDrive -ChildPath 'filled.psd1')
+            $text = Get-Content -LiteralPath $target -Raw
+            $text = $text -replace "(?m)^(\s*TargetServers\s*=\s*)@\(\)", "`$1@('mbx01.example.test', 'mbx02.example.test')"
+            $text = $text -replace "(?m)^(\s*WitnessServer\s*=\s*)''", "`$1'fsw01.example.test'"
+            $text = $text -replace "(?m)^(\s*DagName\s*=\s*)''", "`$1'DAG01'"
+            $text = $text -replace "(?m)^(\s*InternalNames\s*=\s*)@\(\)", "`$1@('mail.example.test')"
+            $text = $text -replace "(?m)^(\s*DatabaseVolume\s*=\s*)''", "`$1'D:'"
+            $text = $text -replace "(?m)^(\s*LogVolume\s*=\s*)''", "`$1'L:'"
+            Set-Content -LiteralPath $target -Value $text
+
+            $config = & (Get-Module $script:ModuleName) { param($p) Import-ExchConfiguration -ConfigPath $p } $target
+            $config.Deployment.WitnessServer | Should -Be 'fsw01.example.test'
+            $config.Certificate.ExpiryWarningDays | Should -Not -BeNullOrEmpty -Because 'the thresholds must still be there under the merged Deployment section'
+
+            @(Get-TestDeploymentWarning -Run ([pscustomobject]@{ Config = $config })).Count | Should -Be 0
+        }
+
+        It 'returns the same shape, minus the deployment warning, when the config is complete' {
+            $none = Get-ExchPreflightReport -Run ([pscustomobject]@{ Config = @{} })
+            $full = Get-ExchPreflightReport -Run ([pscustomobject]@{ Config = @{ Deployment = (New-TestFilledDeployment) } })
+
+            # One property, warnings, holding an array of strings - what Invoke-ExchAssess.ps1
+            # reads.
+            ($full.PSObject.Properties.Name -join ',') | Should -Be 'warnings'
+            ($none.PSObject.Properties.Name -join ',') | Should -Be 'warnings'
+            ($full.warnings -is [array]) | Should -BeTrue
+            foreach ($w in @($full.warnings)) { $w | Should -BeOfType [string] }
+
+            @($full.warnings | Where-Object { $_.StartsWith('Deployment config:') }).Count | Should -Be 0
+            # A complete config removes the one deployment warning and touches nothing else.
+            @($none.warnings).Count | Should -Be (@($full.warnings).Count + 1)
         }
     }
 

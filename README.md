@@ -241,6 +241,44 @@ move `TableAsOf`, and pass it with `-BuildTablePath`. A missing or unparseable f
 rather than an empty table, because an empty table reports every server as unverifiable and
 that looks a lot like a clean run.
 
+### Planning a new deployment
+
+Most of what the assessment needs, it finds for itself. Domain controllers, domains and the
+forest are **discovered** from Active Directory, and existing Exchange servers with
+`Get-ExchangeServer` — none of them is ever supplied. A greenfield Exchange Server SE deployment
+also needs three things the directory cannot supply, because they do not exist yet: the member
+servers that will **become** the Exchange servers, the server that will host the file share
+witness, and the planned names — DAG name, internal namespace, database and log volumes. Those
+**cannot be discovered and must be supplied**, in a deployment config. With the module imported
+as under *Install*:
+
+```powershell
+# 1. Write a fillable copy of the shipped template
+New-ExchDeploymentConfig -Path .\Deployment.psd1
+
+# 2. Fill in TargetServers, WitnessServer, DagName, InternalNames, DatabaseVolume and LogVolume
+notepad .\Deployment.psd1
+
+# 3. Pass it to the run
+.\scripts\Invoke-ExchAssess.ps1 -TenantHint contoso -ConfigPath .\Deployment.psd1
+```
+
+The template is
+[`src/ExchangeAssessment/Config/Deployment.template.psd1`](src/ExchangeAssessment/Config/Deployment.template.psd1).
+It ships empty, and every key carries a comment saying what it is, what supplying it enables and
+what leaving it empty costs. Copy it out rather than editing it. The copy is merged over the
+thresholds like any other `-ConfigPath` file, and a run takes one `-ConfigPath` — so a client
+with threshold overrides as well keeps both in the same file.
+
+Without a deployment config, preflight prints a delimited warning block saying that greenfield
+deployment controls will report `Unknown`, with the template's full path and the commands
+above. That is expected for an assessment of an existing organisation, and the run carries on.
+A config with some keys still empty gets a warning naming exactly those keys.
+
+No collector reads the deployment config yet: the greenfield deployment controls that will are
+[PORT-PLAN.md](PORT-PLAN.md) phase P14. A filled copy holds client host names, so keep it out
+of source control. `Deployment.psd1` is gitignored in this repository for that reason.
+
 ## Development
 
 Development workflow (branching, PRs, releases): [`docs/WORKFLOW.md`](docs/WORKFLOW.md).
