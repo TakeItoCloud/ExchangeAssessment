@@ -427,6 +427,35 @@ function Get-ExchControlCatalog {
             )
         }
         @{
+            controlId  = 'DEP.WIT-01'
+            domain     = 'Environment'
+            title      = 'Greenfield file share witness prerequisites'
+            target     = 'The server named in Deployment.WitnessServer resolves and answers CIM and WinRM, is a domain member in the assessment''s forest, runs Windows Server 2008 or later, is not a domain controller and not one of the target servers, has the File Server role and the File and Printer Sharing and WMI firewall exceptions, and holds the Exchange Trusted Subsystem group in its local Administrators group.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.8.14'; note='Redundancy - the witness holds DAG quorum' }
+                @{ framework='ISO27001:2022'; ref='A.5.30'; note='ICT readiness for a platform deployment' }
+            )
+            references = @(
+                @{ title='Manage database availability groups in Exchange Server'; url='https://learn.microsoft.com/exchange/high-availability/manage-ha/manage-dags' }
+                @{ title='Create a database availability group in Exchange Server'; url='https://learn.microsoft.com/exchange/high-availability/manage-ha/create-dags' }
+                @{ title='New-DatabaseAvailabilityGroup'; url='https://learn.microsoft.com/powershell/module/exchangepowershell/new-databaseavailabilitygroup' }
+            )
+        }
+        @{
+            controlId  = 'DEP.NAME-01'
+            domain     = 'Environment'
+            title      = 'Greenfield planned name availability'
+            target     = 'The planned DAG name is a valid computer name of at most 15 characters that no computer object or Exchange configuration object in the forest holds; each target and witness name is held, if at all, only by that server''s own computer account; and no planned internal name already exists in DNS.'
+            mappings   = @(
+                @{ framework='ISO27001:2022'; ref='A.8.9'; note='Configuration management before deployment' }
+                @{ framework='ISO27001:2022'; ref='A.5.30'; note='ICT readiness for a platform deployment' }
+            )
+            references = @(
+                @{ title='Manage database availability groups in Exchange Server'; url='https://learn.microsoft.com/exchange/high-availability/manage-ha/manage-dags' }
+                @{ title='Naming conventions in Active Directory for computers, domains, sites, and OUs'; url='https://learn.microsoft.com/troubleshoot/windows-server/active-directory/naming-conventions-for-computer-domain-site-ou' }
+            )
+        }
+        @{
             controlId  = 'CLD.ORG-01'
             domain     = 'Cloud'
             title      = 'Exchange Online organisation configuration'

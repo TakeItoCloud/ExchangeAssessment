@@ -267,17 +267,7 @@ function Get-ExchDeploymentTargetServer {
     [CmdletBinding()]
     param([Parameter(Mandatory)][ValidateNotNull()]$Run)
 
-    $seen = @{}
-    $names = New-Object System.Collections.Generic.List[string]
-    foreach ($item in @(Get-ExchThreshold -Run $Run -Name 'Deployment.TargetServers' -Default @())) {
-        $text = ([string]$item).Trim()
-        if (-not $text) { continue }
-        $folded = $text.ToLowerInvariant()
-        if ($seen.ContainsKey($folded)) { continue }
-        $seen[$folded] = $true
-        $names.Add($text) | Out-Null
-    }
-    return $names.ToArray()
+    return @(Get-ExchDeploymentValue -Run $Run -Key 'TargetServers')
 }
 
 function Get-ExchNoTargetServerReason {
@@ -288,11 +278,9 @@ function Get-ExchNoTargetServerReason {
     [CmdletBinding()]
     param()
 
-    $instruction = Get-ExchDeploymentConfigInstruction
     return ("No target servers were supplied: Deployment.TargetServers is empty or absent, so no server that will become an Exchange server was assessed. " +
         "This does not mean there are no target servers - it means none was named, and the directory cannot name them because they are not Exchange servers yet. " +
-        "Template: {0}. Create a copy: {1}. Fill in TargetServers, then pass it back: {2} (or {3})." -f `
-        $instruction.Template, $instruction.CreateCommand, $instruction.PassBackScript, $instruction.PassBackRun)
+        (Get-ExchDeploymentSupplyInstruction -Keys @('TargetServers')))
 }
 
 function Get-ExchPrereqCheckDefinition {
@@ -429,13 +417,19 @@ function Get-ExchTargetState {
     Everything read from one target: whether the name resolved, what each CIM class returned or
     why it did not, and the WinRM reading or why there was none. CimState and WinRmState are
     Succeeded, Partial (CIM only), Failed or NotAttempted, and the matching Error says why.
+
+    DEP.TGT-01 calls it with its own CIM queries and WinRM reader. DEP.WIT-01 passes its own in
+    -CimQuery and -RemoteReader, so both read a server the same way and record it the same way.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateNotNull()]$Run,
         [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$ComputerName,
         [Parameter()][string]$ControlId = '',
-        [Parameter()][object[]]$RebootIndicators = @()
+        [Parameter()][object[]]$RebootIndicators = @(),
+        [Parameter()][object[]]$CimQuery = @(),
+        [Parameter()][scriptblock]$RemoteReader = $null,
+        [Parameter()][object[]]$RemoteArgumentList = @()
     )
 
     $state = [pscustomobject]@{
@@ -471,7 +465,7 @@ function Get-ExchTargetState {
     $addressProperty = $resolution.PSObject.Properties.Match('Addresses') | Select-Object -First 1
     if ($addressProperty) { $state.Addresses = (@($addressProperty.Value) -join ';') }
 
-    $queries = @(Get-ExchTargetCimQuery)
+    $queries = if ($CimQuery.Count -gt 0) { @($CimQuery) } else { @(Get-ExchTargetCimQuery) }
     foreach ($query in $queries) {
         if ($query.Name -ne 'OperatingSystem' -and $state.CimErrors.ContainsKey('OperatingSystem')) {
             $state.CimErrors[$query.Name] = ('{0} not attempted: Win32_OperatingSystem, the first CIM query, failed' -f $query.ClassName)
@@ -492,7 +486,8 @@ function Get-ExchTargetState {
     $state.CimError = (@($queries | Where-Object { $state.CimErrors.ContainsKey($_.Name) } | ForEach-Object { $state.CimErrors[$_.Name] }) -join '; ')
 
     try {
-        $state.Remote = Read-ExchTargetRemote -ComputerName $ComputerName -RebootIndicators $RebootIndicators
+        if ($null -ne $RemoteReader) { $state.Remote = Invoke-ExchTargetCommand -ComputerName $ComputerName -ScriptBlock $RemoteReader -ArgumentList $RemoteArgumentList }
+        else { $state.Remote = Read-ExchTargetRemote -ComputerName $ComputerName -RebootIndicators $RebootIndicators }
         $state.WinRmState = 'Succeeded'
     }
     catch {
@@ -815,8 +810,37 @@ function Invoke-ExchPrereqCheck {
         return [pscustomobject]$row
     }
 
+    $gate = Get-ExchTargetMechanismGate -Target $Target -Definition $Definition
+    $row.Mechanisms = $gate.Mechanisms
+    $row.MechanismState = $gate.MechanismState
+    if (@($gate.Blocked).Count -gt 0) {
+        $row.Cause = ('Not read: {0}.' -f ((@($gate.Blocked) | ForEach-Object { ([string]$_).TrimEnd('.') }) -join '; '))
+        return [pscustomobject]$row
+    }
+
+    $result = Test-ExchPrereqCheck -Key $Key -Entry $entry -Prerequisites $Prerequisites -Target $Target
+    $row.Outcome  = [string]$result.Outcome
+    $row.Required = [string]$result.Required
+    $row.Measured = [string]$result.Measured
+    $row.Cause    = [string]$result.Cause
+    if ($row.Outcome -eq 'Unknown' -and -not $row.Cause) { $row.Cause = 'The check returned no verdict and no reason.' }
+    return [pscustomobject]$row
+}
+
+function Get-ExchTargetMechanismGate {
+    <#
+    Whether the CIM classes and WinRM items a check needs were read from a target. Returns the
+    mechanisms the check names, their state for the row, and for each one that was not read, why.
+    A check is attempted only when Blocked is empty. DEP.TGT-01 and DEP.WIT-01 both gate here, so a
+    mechanism that failed costs exactly the checks that need it, in both controls.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateNotNull()]$Target,
+        [Parameter(Mandatory)][ValidateNotNull()]$Definition
+    )
+
     $mechanisms = @($Definition.Mechanisms)
-    $row.Mechanisms = ($mechanisms -join '+')
     $states = New-Object System.Collections.Generic.List[string]
     $blocked = New-Object System.Collections.Generic.List[string]
 
@@ -855,19 +879,11 @@ function Invoke-ExchPrereqCheck {
         }
     }
 
-    $row.MechanismState = ($states.ToArray() -join ' ')
-    if ($blocked.Count -gt 0) {
-        $row.Cause = ('Not read: {0}.' -f (($blocked.ToArray() | ForEach-Object { ([string]$_).TrimEnd('.') }) -join '; '))
-        return [pscustomobject]$row
+    return [pscustomobject]@{
+        Mechanisms     = ($mechanisms -join '+')
+        MechanismState = ($states.ToArray() -join ' ')
+        Blocked        = $blocked.ToArray()
     }
-
-    $result = Test-ExchPrereqCheck -Key $Key -Entry $entry -Prerequisites $Prerequisites -Target $Target
-    $row.Outcome  = [string]$result.Outcome
-    $row.Required = [string]$result.Required
-    $row.Measured = [string]$result.Measured
-    $row.Cause    = [string]$result.Cause
-    if ($row.Outcome -eq 'Unknown' -and -not $row.Cause) { $row.Cause = 'The check returned no verdict and no reason.' }
-    return [pscustomobject]$row
 }
 
 function Test-ExchPrereqCheck {

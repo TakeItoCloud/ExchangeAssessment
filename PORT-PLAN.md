@@ -29,12 +29,15 @@ evaluate" from "passed", and the analyzer suspensions below are gone.
 | P14 | Greenfield deployment (`DEP.*`) collectors that read the P13 `Deployment` section (see *P14*) | In progress | 2026-09-11 |
 | P14.1 | `DEP.TGT-01` target server prerequisite readiness, `Config/PrereqTable.psd1` and `-PrereqTablePath` | In progress - green over mocks; first real run is P14.7 | 2026-09-11 |
 | P14.2 | `DEP.NET-01` port reachability probed from each target server outward, `Config/PortMatrix.psd1` and `-PortMatrixPath` | In progress - green over mocks; first real run is P14.8 | 2026-09-11 |
-| P14.3 | `DEP.WIT-01` file share witness prerequisites | Planned | |
-| P14.4 | `DEP.NAME-01` name and DNS availability for the planned names | Planned | |
+| P14.3 | `DEP.WIT-01` file share witness prerequisites | In progress - green over mocks; first real run is P14.9 | 2026-09-11 |
+| P14.4 | `DEP.NAME-01` name and DNS availability for the planned names | In progress - green over mocks; first real run is P14.10 | 2026-09-11 |
 | P14.5 | `DEP.VOL-01` database and log volume checks on the target servers (`DatabaseVolume`, `LogVolume`) | Planned | |
 | P14.6 | `DEP-01` greenfield roll-up, declaring `DEP.TGT-01` and the other `DEP.*` controls in `Requires` | Planned | |
 | P14.7 | First run of `DEP.TGT-01` against real target servers - owner: Carlos Annes (operator) | Planned | |
 | P14.8 | First run of `DEP.NET-01` from real target servers over a real network path - owner: Carlos Annes (operator) | Planned | |
+| P14.9 | First run of `DEP.WIT-01` against a real, sanitised witness server, before and after `/PrepareAD` - owner: Carlos Annes (operator) | Planned | |
+| P14.10 | First run of `DEP.NAME-01` against a real directory and real DNS - owner: Carlos Annes (operator) | Planned | |
+| P14.11 | Add `WitnessDirectory` to the P13 template and key list as an optional key, so the `DEP.WIT-01` witness directory check can be found from the template; preflight must not report it missing | Planned | |
 | P15 | Generate the P13 deployment config from an approval table | Planned | |
 | P16 | Test debt reported by P13: the comment-based help guard names one function, so it cannot catch the next export added without help, and the twelve older exports have none; and nothing runs the suite under Windows PowerShell 5.1 (see *P16*) | Planned | |
 
@@ -299,7 +302,46 @@ with cause `timeout`, how long a refusal takes against the 5000 ms default, what
 measurement records inside a WinRM session with no delegation, and how long the run takes against
 the forest's number of domain controllers. Record what differs from the mocks.
 
-**P14.3 to P14.6** are the remaining `DEP.*` controls. `DEP.VOL-01` is added so that the checks the
+**P14.3 `DEP.WIT-01` - In progress 2026-09-11.** The witness comes from `Deployment.WitnessServer`
+and nowhere else; empty - the shipped template's state - is one `Unknown` finding that contacts
+nothing, not an error. Thirteen checks, each tied to a Learn statement read on 2026-09-11, with the
+values in `Config/Thresholds.psd1` under `WitnessPrerequisites`. The server is read the `DEP.TGT-01`
+way: `Get-ExchTargetState` now takes the CIM queries and WinRM reader as parameters, and the
+per-mechanism gate was extracted to `Get-ExchTargetMechanismGate`, so both controls degrade
+identically. The Exchange Trusted Subsystem grant is three states - not in the directory yet
+(`Unknown`, expected before `/PrepareAD`), present and not a local Administrator (`NonCompliant`),
+present and a member (`Compliant`) - and an unreadable directory is a fourth cause, never one of
+them. Learn does not forbid an Exchange server as witness - it recommends one - so that is reported,
+not failed. Two values are measured rather than read: the firewall rule-group ids, read on the dev
+VM's Windows 11, which P14.9 confirms on Windows Server. The optional `WitnessDirectory` key is read
+but not yet in the template; P14.11 owns that.
+
+**P14.4 `DEP.NAME-01` - In progress 2026-09-11.** Checks that each planned name is free, not that it
+exists. The DAG name: at most 15 characters (manage-dags), a valid computer name (KB 909264), held
+by no computer object in the forest, by no planned server, and by no object under
+`CN=Microsoft Exchange` in the configuration partition - where an existing DAG lives; the schema
+pages name the class `Exch-MDB-Availability-Group` but not its LDAP name, so the search is by name,
+not class. Target and witness names are judged against the server itself, as the operator decided on
+2026-09-11: a member server holds its own computer account, so one object whose `dNSHostName` is the
+supplied name is expected, and any other holder or a duplicate is a finding. Internal names must not
+exist in DNS. Every rationale states the scope of the global catalog and resolvers queried and what
+they cannot see.
+
+**P14.9 - first real run of `DEP.WIT-01`. Owner: Carlos Annes (operator).** Against a real,
+sanitised witness server: confirm the two firewall group ids return rules on Windows Server, that
+`Get-WindowsFeature -Name FS-FileServer` answers over WinRM, that the WinNT read of the local
+Administrators group returns SIDs, that `Get-ADDomainController -Discover -Service GlobalCatalog` and
+`Get-ADGroup` over port 3268 find the Exchange Trusted Subsystem group, and that the grant reads state
+(a) before `/PrepareAD` and (b) or (c) after it. Record what differs from the mocks.
+
+**P14.10 - first real run of `DEP.NAME-01`. Owner: Carlos Annes (operator).** Against a real
+directory and DNS: confirm the global catalog search matches computer objects by `cn`,
+`sAMAccountName` and `dNSHostName`, that a domain-joined target reads `OwnAccount`, that the
+configuration search finds an existing DAG by name and reads `NoExchangeOrganization` in a forest
+not prepared for Exchange, and that `Resolve-DnsName -DnsOnly` separates `NameDoesNotExist` from
+`NoAddressRecord` against the client's resolvers. Record what differs from the mocks.
+
+**P14.5 and P14.6** are the remaining `DEP.*` controls. `DEP.VOL-01` is added so that the checks the
 template promises for `DatabaseVolume` and `LogVolume` are owned rather than implied.
 
 ### P16 — Test debt reported by P13
