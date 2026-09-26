@@ -2990,6 +2990,16 @@ Describe 'ExchangeAssessment' {
                 'Get-ExchangeServer'                  = 'param()'
                 'Get-HotFix'                          = 'param($ComputerName)'
                 'Get-Mitigations'                     = 'param()'
+                'Get-OwaVirtualDirectory'             = 'param($Server)'
+                'Get-EcpVirtualDirectory'             = 'param($Server)'
+                'Get-WebServicesVirtualDirectory'     = 'param($Server)'
+                'Get-OabVirtualDirectory'             = 'param($Server)'
+                'Get-AutodiscoverVirtualDirectory'    = 'param($Server)'
+                'Get-MapiVirtualDirectory'            = 'param($Server)'
+                'Get-ActiveSyncVirtualDirectory'      = 'param($Server)'
+                'Get-PowerShellVirtualDirectory'      = 'param($Server)'
+                'Get-OutlookAnywhere'                 = 'param($Server)'
+                'Get-ClientAccessService'             = 'param()'
             }
             foreach ($name in $stubs.Keys) {
                 if (Get-Command -Name $name -ErrorAction SilentlyContinue) { continue }
@@ -3100,6 +3110,61 @@ Describe 'ExchangeAssessment' {
 
             { & (Get-Module $script:ModuleName) { Invoke-ExchWithWarningCapture -Label 'Get-Thing' -Script { throw 'boom (test)' } } } |
                 Should -Throw -ExpectedMessage 'boom (test)'
+        }
+
+        It 'keeps what a query returned before it failed, and records the failure' {
+            # The plain `& $Script` the warning capture replaced streamed its output, so objects a
+            # query returned before failing reached the caller. Buffering them would drop one
+            # server's rows because another did not answer.
+            $errors = New-Object System.Collections.Generic.List[string]
+            $out = & (Get-Module $script:ModuleName) {
+                param($e)
+                Invoke-ExchQuery -Label 'Get-Thing' -Errors $e -Script { 'first'; 'second'; throw 'third server did not answer (test)' }
+            } $errors
+
+            @($out) | Should -Be @('first', 'second')
+            $errors.Count | Should -Be 1
+            $errors[0] | Should -Be 'Get-Thing: third server did not answer (test)'
+        }
+
+        It 'EX.VDIR-01 reads each server on its own, so one unreachable server costs only its own rows' {
+            # Nine reads per server: eight directory types and Outlook Anywhere.
+            $script:DeclaredVdirReads = 9
+            Mock -ModuleName $script:ModuleName Get-ExchangeServer {
+                [pscustomobject]@{ Name = 'EX01'; ServerRole = 'Mailbox' }
+                [pscustomobject]@{ Name = 'EX02'; ServerRole = 'Mailbox' }
+                [pscustomobject]@{ Name = 'EDGE01'; ServerRole = 'Edge' }
+            }
+            $vdirMock = {
+                if (-not $Server) { throw 'an organisation-wide read must not be used when servers are listed (test)' }
+                if ($Server -eq 'EX02') { throw "The task wasn't able to connect to IIS on the server 'EX02.example.test': The RPC server is unavailable. (test)" }
+                [pscustomobject]@{ Name = 'vdir (Default Web Site)'; Server = $Server; InternalUrl = "https://$Server.example.test/x"; ExternalUrl = 'https://mail.contoso.com/x'; WindowsAuthentication = $true }
+            }
+            foreach ($name in @('Get-OwaVirtualDirectory', 'Get-EcpVirtualDirectory', 'Get-WebServicesVirtualDirectory', 'Get-OabVirtualDirectory',
+                                'Get-AutodiscoverVirtualDirectory', 'Get-MapiVirtualDirectory', 'Get-ActiveSyncVirtualDirectory', 'Get-PowerShellVirtualDirectory')) {
+                Mock -ModuleName $script:ModuleName -CommandName $name -MockWith $vdirMock
+            }
+            Mock -ModuleName $script:ModuleName Get-OutlookAnywhere {
+                if ($Server -eq 'EX02') { throw 'The RPC server is unavailable. (test)' }
+                [pscustomobject]@{ ServerName = $Server; ExternalHostname = 'mail.contoso.com'; InternalHostname = "$Server.example.test"; ExternalClientsRequireSsl = $true; InternalClientsRequireSsl = $true }
+            }
+            Mock -ModuleName $script:ModuleName Get-ClientAccessService { [pscustomobject]@{ Name = 'EX01'; AutoDiscoverServiceInternalUri = 'https://autodiscover.contoso.com/Autodiscover/Autodiscover.xml' } }
+
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_EX_VDIR_01_VirtualDirectories' -Run (New-TestRun)
+
+            $vdirs = Get-TestSectionRows -Result $result -Key 'exchange.virtual-directories'
+            $vdirs.Count | Should -Be 8 -Because 'every directory type on the server that answered must be read'
+            @($vdirs | Where-Object { $_.Server -ne 'EX01' }).Count | Should -Be 0
+
+            $reads = Get-TestSectionRows -Result $result -Key 'exchange.virtual-directory-reads'
+            @($reads | Where-Object { $_.Server -eq 'EX01' -and $_.Read -eq $true }).Count | Should -Be $script:DeclaredVdirReads
+            @($reads | Where-Object { $_.Server -eq 'EX02' -and $_.Read -eq $false }).Count | Should -Be $script:DeclaredVdirReads
+            @($reads | Where-Object { $_.Server -eq 'EDGE01' }).Count | Should -Be 0 -Because 'an Edge Transport server has no client access virtual directories'
+
+            $finding = $result.findings[0]
+            $finding.result.outcome | Should -Be 'Unknown'
+            $finding.result.rationale | Should -Match 'could not be read on 1 servers.*EX02'
+            $finding.result.metrics.serversRead | Should -Be 1
         }
 
         It 'MB.DB-01 requests copy status by database name and reads sizes from text' {

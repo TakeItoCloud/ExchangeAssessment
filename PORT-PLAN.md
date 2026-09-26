@@ -21,6 +21,7 @@ evaluate" from "passed", and the analyzer suspensions below are gone.
 | P3.3 | Reported by P3.1: `Test-ExchPolicyBlocksBasicAuth` (`CAS-01`) treats a protocol property a policy does not carry as blocked, so an absent property reads as a pass; read the on-premises authentication policy property set on Learn and make an absent one Unknown | Planned | |
 | P3.4 | Reported by P3.1: only the four collectors that crashed were moved to guarded property reads. The others still read Exchange object properties directly under strict mode; audit them against Learn and the P3.2 run | Planned | |
 | P3.5 | Reported by P3.1: warnings are now recorded for every query, but only `DAG-01` and `MB.DB-01` judge on them. `SRV-01`, `CERT-01`, `EX.VDIR-01` and `TR.QUE-01` read per-server state that Exchange reports partially through warnings; decide per control whether a warning makes its verdict Unknown | Planned | |
+| P3.6 | Reported by P3.1: `MB.AV-01` cannot tell "no exclusions configured" from "exclusions hidden". With Defender's `HideExclusionsFromLocalAdmins` set, `Get-MpPreference` shows none even to an administrator, and every recommended exclusion would be reported missing. Read the policy state and report such a server as not assessable | Planned | |
 | P4 | Finish the AV exclusion check — compare, do not just report | Done | 2026-08-31 |
 | P5 | Operational health checks: service, mail flow, replication, queues, index | Done | 2026-09-01 |
 | P6 | Ignore list, alerting and scheduled-run modes | Dropped | 2026-09-02 |
@@ -118,6 +119,11 @@ operator. What it showed, by cause:
 - Environment, not tool: two DAG members answered no RPC, WMI or IIS call from the assessment
   host, and WinRM loopback to the assessment host was refused for `MB.AV-01` and `TLS-01`, which
   need local administrative rights as the README states.
+
+- **`EX.VDIR-01` read no server's virtual directories.** Each directory type was read once for the
+  whole organisation; the read fails as a whole when one server's IIS does not answer, and all
+  nine reads failed on one unreachable member - taking the servers that did answer with them,
+  the assessment host included.
 
 P3.1 fixes the tool defects. Each fix has a regression test built from the shape measured, with
 fictional values, and each test was shown red with the old code restored. Green over mocks proves
