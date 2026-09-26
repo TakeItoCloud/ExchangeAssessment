@@ -44,10 +44,17 @@ function Invoke-ExchCollector_REPL_01_ReplicationHealth {
 
     $mapiRows = New-Object System.Collections.Generic.List[object]
     foreach ($db in @(Invoke-ExchQuery -Label 'Get-MailboxDatabase' -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-MailboxDatabase -Status -ErrorAction Stop })) {
-        if (-not $db.Mounted) { continue }
-        foreach ($result in @(Invoke-ExchQuery -Label ("Test-MAPIConnectivity on {0}" -f $db.Name) -Errors $errors -Run $Run -ControlId $control.controlId -Script { Test-MAPIConnectivity -Database $db.Identity -ErrorAction Stop })) {
+        # Only a database measured as dismounted is skipped; MB.DB-01 reports it. One whose
+        # Mounted state did not come back is tested, so the test says what the status read could
+        # not. The database is passed by name, a string: over the Exchange Management Shell's
+        # remote session $db.Identity is a deserialized ADObjectId that -Database cannot bind -
+        # measured on the first live run, which logged 20 failures of exactly that form.
+        $dbName = [string](Get-ExchObjectValue -InputObject $db -Name 'Name' -Default '')
+        if (-not $dbName) { continue }
+        if ((Get-ExchObjectBool -InputObject $db -Name 'Mounted') -eq $false) { continue }
+        foreach ($result in @(Invoke-ExchQuery -Label ("Test-MAPIConnectivity on {0}" -f $dbName) -Errors $errors -Run $Run -ControlId $control.controlId -Script { Test-MAPIConnectivity -Database $dbName -ErrorAction Stop })) {
             $mapiRows.Add([pscustomobject]@{
-                Database = [string]$db.Name
+                Database = $dbName
                 Server   = [string]$result.Server
                 Result   = [string]$result.Result
                 Latency  = (ConvertTo-ExchFlatValue -Value $result.Latency)

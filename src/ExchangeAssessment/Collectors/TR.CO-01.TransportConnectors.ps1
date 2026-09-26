@@ -366,15 +366,22 @@ function Test-ExchAnonymousRelayGranted {
         [Parameter()][string]$RelayPermission = 'ms-Exch-SMTP-Accept-Any-Recipient'
     )
 
-    $identity = [string](Get-ExchObjectValue -InputObject $Connector -Name 'Identity' -Default '')
+    # The distinguished name is read first. Get-ADPermission resolves its -Identity as a raw
+    # Active Directory entry, and the connector's 'SERVER\Connector' Identity string is not one
+    # it can find - measured on the first live run, which logged 58 receive connector failures
+    # of the form "couldn't be found on <domain controller>". Identity and Name remain as fallbacks for
+    # objects that carry no DistinguishedName.
+    $identity = [string](Get-ExchObjectValue -InputObject $Connector -Name 'DistinguishedName' -Default '')
+    if (-not $identity) { $identity = [string](Get-ExchObjectValue -InputObject $Connector -Name 'Identity' -Default '') }
     if (-not $identity) { $identity = [string](Get-ExchObjectValue -InputObject $Connector -Name 'Name' -Default '') }
     if (-not $identity) {
-        $Errors.Add('A receive connector carried neither an Identity nor a Name, so its relay permission could not be read.') | Out-Null
+        $Errors.Add('A receive connector carried no DistinguishedName, Identity or Name, so its relay permission could not be read.') | Out-Null
         return 'Unknown'
     }
 
     $before = $Errors.Count
-    $permissions = @(Invoke-ExchQuery -Label ("Get-ADPermission on receive connector {0}" -f $identity) `
+    $displayName = [string](Get-ExchObjectValue -InputObject $Connector -Name 'Identity' -Default $identity)
+    $permissions = @(Invoke-ExchQuery -Label ("Get-ADPermission on receive connector {0}" -f $displayName) `
         -Errors $Errors -Run $Run -ControlId $ControlId `
         -Script { Get-ADPermission -Identity $identity -ErrorAction Stop })
 

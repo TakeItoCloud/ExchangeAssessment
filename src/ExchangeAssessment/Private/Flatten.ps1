@@ -204,3 +204,63 @@ function Get-ExchSum {
 
     return $measured[0].Sum
 }
+
+function ConvertTo-ExchByteCount {
+    <#
+    Reads an Exchange size value as a number of bytes, or $null when no size can be read.
+
+    Exchange sizes are ByteQuantifiedSize values. In a local session they carry ToBytes(); over
+    the remote PowerShell session the Exchange Management Shell always uses, they are expected
+    to arrive deserialized as their text form - '1.25 GB (1,342,177,280 bytes)' - without it.
+    Not yet measured (the first live run failed earlier on both size reads); PORT-PLAN P3.2
+    confirms. Calling ToBytes() where it is absent throws, and a caller that catches the throw
+    reports every size as unreadable, so both forms are read. So the method is used when present, and otherwise the exact byte count in
+    parentheses is parsed. A value with no byte count - 'Unlimited', an empty string, anything
+    else - returns $null, never 0: an unread size is not an empty one.
+
+    A MailboxStatistics TotalItemSize is an Unlimited<ByteQuantifiedSize>; pass its .Value when
+    it has one, or the object itself, which renders the same text.
+    #>
+    [CmdletBinding()]
+    param([Parameter()]$Value)
+
+    if ($null -eq $Value) { return $null }
+
+    $toBytes = $Value.PSObject.Methods.Match('ToBytes') | Select-Object -First 1
+    if ($toBytes) {
+        try { return [double]$Value.ToBytes() } catch { Write-Verbose ("ToBytes() failed on '{0}': {1}" -f $Value, $_.Exception.Message) }
+    }
+
+    $text = [string]$Value
+    if ($text -match '\(\s*([\d][\d,\.\s]*)\s*bytes\s*\)') {
+        $digits = $matches[1] -replace '[^\d]', ''
+        if ($digits) { return [double]$digits }
+    }
+
+    return $null
+}
+
+function Get-ExchObjectBool {
+    <#
+    Reads a boolean property as $true, $false, or $null when the object does not carry it or
+    carries it as null.
+
+    [bool]$object.Enabled turns a missing property into $false, and a judgement built on that
+    reports "disabled" about something nobody measured. This keeps the third state so the
+    caller can report it as unreadable.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()]$InputObject,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Name
+    )
+
+    $value = Get-ExchObjectValue -InputObject $InputObject -Name $Name
+    if ($null -eq $value) { return $null }
+    if ($value -is [bool]) { return $value }
+
+    $text = ([string]$value).Trim()
+    if ($text -eq 'True')  { return $true }
+    if ($text -eq 'False') { return $false }
+    return [bool]$value
+}

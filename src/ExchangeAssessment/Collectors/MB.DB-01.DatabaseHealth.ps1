@@ -15,7 +15,15 @@ function Invoke-ExchCollector_MB_DB_01_DatabaseHealth {
     $ErrorActionPreference = 'Stop'
     $control = Get-ExchControlById -ControlId 'MB.DB-01'
 
-    try { $databases = @(Get-MailboxDatabase -Status -ErrorAction Stop) }
+    # -Status reads Mounted, DatabaseSize and LastFullBackup from each database's Information
+    # Store. A store Exchange cannot reach is reported as a warning, not an error, and the
+    # database still comes back with those fields empty. The warnings are captured so they reach
+    # the report, and an empty Mounted is treated as not measured below.
+    $statusWarnings = New-Object System.Collections.Generic.List[string]
+    try {
+        $databases = @(Invoke-ExchWithWarningCapture -Label 'Get-MailboxDatabase -Status' -Run $Run -ControlId $control.controlId `
+            -Warnings $statusWarnings -Script { Get-MailboxDatabase -Status -ErrorAction Stop })
+    }
     catch {
         $reason = "Get-MailboxDatabase failed, so no database was assessed: $($_.Exception.Message)"
         $null = Write-ExchError -Run $Run -Context 'Get-MailboxDatabase' -ErrorRecord $_ -ControlId $control.controlId
@@ -49,53 +57,75 @@ function Invoke-ExchCollector_MB_DB_01_DatabaseHealth {
     $now = Get-Date
 
     foreach ($db in $databases) {
-        $sizeGb = $null
-        try { if ($db.DatabaseSize) { $sizeGb = [math]::Round($db.DatabaseSize.ToBytes() / 1GB, 2) } } catch { $sizeGb = $null }
+        $dbName = [string](Get-ExchObjectValue -InputObject $db -Name 'Name' -Default '')
 
+        # Mounted is three-state. $null means the Information Store did not answer, and every
+        # other -Status field on that database is unmeasured with it; [bool]$null would report
+        # the database as dismounted.
+        $mounted = Get-ExchObjectBool -InputObject $db -Name 'Mounted'
+
+        $sizeBytes = ConvertTo-ExchByteCount -Value (Get-ExchObjectValue -InputObject $db -Name 'DatabaseSize')
+        $sizeGb = $(if ($null -ne $sizeBytes) { [math]::Round($sizeBytes / 1GB, 2) } else { $null })
+
+        $lastFullBackup = Get-ExchObjectValue -InputObject $db -Name 'LastFullBackup'
         $backupAgeDays = $null
-        try { if ($db.LastFullBackup) { $backupAgeDays = [math]::Round(($now - [datetime]$db.LastFullBackup).TotalDays, 1) } } catch { $backupAgeDays = $null }
+        try { if ($lastFullBackup) { $backupAgeDays = [math]::Round(($now - [datetime]$lastFullBackup).TotalDays, 1) } } catch { $backupAgeDays = $null }
 
         $dbRows.Add([pscustomobject]@{
-            Name                    = [string]$db.Name
-            Server                  = [string]$db.Server
-            Mounted                 = [bool]$db.Mounted
+            Name                    = $dbName
+            Server                  = [string](Get-ExchObjectValue -InputObject $db -Name 'Server' -Default '')
+            Mounted                 = $mounted
+            StatusRead              = ($null -ne $mounted)
             SizeGB                  = $sizeGb
-            EdbFilePath             = [string]$db.EdbFilePath
-            LogFolderPath           = [string]$db.LogFolderPath
-            CircularLoggingEnabled  = [bool]$db.CircularLoggingEnabled
-            LastFullBackup          = $db.LastFullBackup
+            EdbFilePath             = [string](Get-ExchObjectValue -InputObject $db -Name 'EdbFilePath' -Default '')
+            LogFolderPath           = [string](Get-ExchObjectValue -InputObject $db -Name 'LogFolderPath' -Default '')
+            CircularLoggingEnabled  = (Get-ExchObjectBool -InputObject $db -Name 'CircularLoggingEnabled')
+            LastFullBackup          = $lastFullBackup
             BackupAgeDays           = $backupAgeDays
-            ProhibitSendQuota       = [string]$db.ProhibitSendQuota
-            ProhibitSendReceiveQuota= [string]$db.ProhibitSendReceiveQuota
-            IssueWarningQuota       = [string]$db.IssueWarningQuota
-            MailboxRetention        = [string]$db.MailboxRetention
-            DeletedItemRetention    = [string]$db.DeletedItemRetention
-            ActivationPreference    = (ConvertTo-ExchFlatValue -Value $db.ActivationPreference)
-            MasterServerOrAvailabilityGroup = [string]$db.MasterServerOrAvailabilityGroup
+            ProhibitSendQuota       = [string](Get-ExchObjectValue -InputObject $db -Name 'ProhibitSendQuota' -Default '')
+            ProhibitSendReceiveQuota= [string](Get-ExchObjectValue -InputObject $db -Name 'ProhibitSendReceiveQuota' -Default '')
+            IssueWarningQuota       = [string](Get-ExchObjectValue -InputObject $db -Name 'IssueWarningQuota' -Default '')
+            MailboxRetention        = [string](Get-ExchObjectValue -InputObject $db -Name 'MailboxRetention' -Default '')
+            DeletedItemRetention    = [string](Get-ExchObjectValue -InputObject $db -Name 'DeletedItemRetention' -Default '')
+            ActivationPreference    = (ConvertTo-ExchFlatValue -Value @(Get-ExchObjectValue -InputObject $db -Name 'ActivationPreference'))
+            MasterServerOrAvailabilityGroup = [string](Get-ExchObjectValue -InputObject $db -Name 'MasterServerOrAvailabilityGroup' -Default '')
         }) | Out-Null
 
+        if (-not $dbName) {
+            $copyReadErrors.Add('A database was returned without a Name, so its copy status could not be requested.') | Out-Null
+            continue
+        }
+
+        # The database is passed by name, a string. Over the remote session the Exchange
+        # Management Shell uses, $db.Identity arrives as a deserialized ADObjectId that the
+        # cmdlet's DatabaseCopyIdParameter cannot bind - measured on the first live run, which
+        # logged 30 database failures of exactly that form. A database name returns all of its copies:
+        # https://learn.microsoft.com/powershell/module/exchangepowershell/get-mailboxdatabasecopystatus?view=exchange-ps (read 2026-09-26).
         try {
-            foreach ($copy in @(Get-MailboxDatabaseCopyStatus -Identity $db.Identity -ErrorAction Stop)) {
-                $copyQueue = 0; $replayQueue = 0
-                try { $copyQueue = [int]$copy.CopyQueueLength } catch { $copyQueue = 0 }
-                try { $replayQueue = [int]$copy.ReplayQueueLength } catch { $replayQueue = 0 }
+            foreach ($copy in @(Get-MailboxDatabaseCopyStatus -Identity $dbName -ErrorAction Stop)) {
+                # A queue length that cannot be read is $null, not 0: 0 is a healthy measurement.
+                $copyQueue = $null; $replayQueue = $null
+                try { $v = Get-ExchObjectValue -InputObject $copy -Name 'CopyQueueLength';   if ($null -ne $v) { $copyQueue = [int64]$v } } catch { $copyQueue = $null }
+                try { $v = Get-ExchObjectValue -InputObject $copy -Name 'ReplayQueueLength'; if ($null -ne $v) { $replayQueue = [int64]$v } } catch { $replayQueue = $null }
+                $status = [string](Get-ExchObjectValue -InputObject $copy -Name 'Status' -Default '')
+                $indexState = [string](Get-ExchObjectValue -InputObject $copy -Name 'ContentIndexState' -Default '')
 
                 $copyRows.Add([pscustomobject]@{
-                    Database          = [string]$db.Name
-                    Copy              = [string]$copy.Name
-                    Status            = [string]$copy.Status
-                    ActiveCopy        = [bool]$copy.ActiveCopy
+                    Database          = $dbName
+                    Copy              = [string](Get-ExchObjectValue -InputObject $copy -Name 'Name' -Default '')
+                    Status            = $status
+                    ActiveCopy        = (Get-ExchObjectBool -InputObject $copy -Name 'ActiveCopy')
                     CopyQueueLength   = $copyQueue
                     ReplayQueueLength = $replayQueue
-                    ContentIndexState = [string]$copy.ContentIndexState
-                    StatusHealthy     = ($healthyStatuses -contains [string]$copy.Status)
-                    IndexHealthy      = ($healthyIndex -contains [string]$copy.ContentIndexState)
+                    ContentIndexState = $indexState
+                    StatusHealthy     = $(if ($status) { $healthyStatuses -contains $status } else { $null })
+                    IndexHealthy      = $(if ($indexState) { $healthyIndex -contains $indexState } else { $null })
                 }) | Out-Null
             }
         }
         catch {
-            $copyReadErrors.Add(("{0}: {1}" -f $db.Name, $_.Exception.Message)) | Out-Null
-            $null = Write-ExchError -Run $Run -Context ('Get-MailboxDatabaseCopyStatus on {0}' -f $db.Name) -ErrorRecord $_ -ControlId $control.controlId -Severity 'Warning'
+            $copyReadErrors.Add(("{0}: {1}" -f $dbName, $_.Exception.Message)) | Out-Null
+            $null = Write-ExchError -Run $Run -Context ('Get-MailboxDatabaseCopyStatus on {0}' -f $dbName) -ErrorRecord $_ -ControlId $control.controlId -Severity 'Warning'
         }
     }
 
@@ -106,11 +136,12 @@ function Invoke-ExchCollector_MB_DB_01_DatabaseHealth {
         databases = $dbArr
         copies    = $copyArr
         copyReadErrors = @($copyReadErrors.ToArray())
+        statusWarnings = @($statusWarnings.ToArray())
     })
 
     $sections = @(
         New-ExchInventorySection -Run $Run -Key 'mailbox.databases' -Title 'Mailbox Databases' -Area 'Mailbox' `
-            -Columns @('Name', 'Server', 'Mounted', 'SizeGB', 'EdbFilePath', 'LogFolderPath', 'CircularLoggingEnabled', 'LastFullBackup', 'BackupAgeDays', 'ProhibitSendQuota', 'ProhibitSendReceiveQuota', 'IssueWarningQuota', 'MailboxRetention', 'DeletedItemRetention', 'ActivationPreference', 'MasterServerOrAvailabilityGroup') `
+            -Columns @('Name', 'Server', 'Mounted', 'StatusRead', 'SizeGB', 'EdbFilePath', 'LogFolderPath', 'CircularLoggingEnabled', 'LastFullBackup', 'BackupAgeDays', 'ProhibitSendQuota', 'ProhibitSendReceiveQuota', 'IssueWarningQuota', 'MailboxRetention', 'DeletedItemRetention', 'ActivationPreference', 'MasterServerOrAvailabilityGroup') `
             -Rows $dbArr
 
         New-ExchInventorySection -Run $Run -Key 'mailbox.database-copies' -Title 'Mailbox Database Copies' -Area 'Mailbox' `
@@ -118,15 +149,21 @@ function Invoke-ExchCollector_MB_DB_01_DatabaseHealth {
             -Rows $copyArr
     )
 
-    $unmounted    = @($dbArr | Where-Object { -not $_.Mounted })
-    $noBackup     = @($dbArr | Where-Object { $null -eq $_.BackupAgeDays })
-    $staleBackup  = @($dbArr | Where-Object { $null -ne $_.BackupAgeDays -and $_.BackupAgeDays -gt $maxBackupAgeDays })
-    $circular     = @($dbArr | Where-Object { $_.CircularLoggingEnabled })
-    $large        = @($dbArr | Where-Object { $null -ne $_.SizeGB -and $_.SizeGB -gt $largeDbGb })
-    $badStatus    = @($copyArr | Where-Object { -not $_.StatusHealthy })
-    $badIndex     = @($copyArr | Where-Object { -not $_.IndexHealthy })
-    $copyCritical = @($copyArr | Where-Object { $_.CopyQueueLength -gt $copyCrit -or $_.ReplayQueueLength -gt $replayCrit })
-    $copyWarning  = @($copyArr | Where-Object { ($_.CopyQueueLength -gt $copyWarn -or $_.ReplayQueueLength -gt $replayWarn) -and $_ -notin $copyCritical })
+    # Databases whose Information Store did not answer are judged on nothing that -Status
+    # reads: not mounted state, not backup age, not size. They are reported as Unknown instead.
+    $statusUnread = @($dbArr | Where-Object { -not $_.StatusRead })
+    $statusDbs    = @($dbArr | Where-Object { $_.StatusRead })
+
+    $unmounted    = @($statusDbs | Where-Object { $_.Mounted -eq $false })
+    $noBackup     = @($statusDbs | Where-Object { $null -eq $_.BackupAgeDays })
+    $staleBackup  = @($statusDbs | Where-Object { $null -ne $_.BackupAgeDays -and $_.BackupAgeDays -gt $maxBackupAgeDays })
+    $circular     = @($dbArr | Where-Object { $_.CircularLoggingEnabled -eq $true })
+    $large        = @($statusDbs | Where-Object { $null -ne $_.SizeGB -and $_.SizeGB -gt $largeDbGb })
+    $badStatus    = @($copyArr | Where-Object { $_.StatusHealthy -eq $false })
+    $badIndex     = @($copyArr | Where-Object { $_.IndexHealthy -eq $false })
+    $copyUnread   = @($copyArr | Where-Object { $null -eq $_.StatusHealthy -or $null -eq $_.CopyQueueLength -or $null -eq $_.ReplayQueueLength })
+    $copyCritical = @($copyArr | Where-Object { ($null -ne $_.CopyQueueLength -and $_.CopyQueueLength -gt $copyCrit) -or ($null -ne $_.ReplayQueueLength -and $_.ReplayQueueLength -gt $replayCrit) })
+    $copyWarning  = @($copyArr | Where-Object { (($null -ne $_.CopyQueueLength -and $_.CopyQueueLength -gt $copyWarn) -or ($null -ne $_.ReplayQueueLength -and $_.ReplayQueueLength -gt $replayWarn)) -and $_ -notin $copyCritical })
 
     $problems = New-Object System.Collections.Generic.List[string]
     $outcomes = New-Object System.Collections.Generic.List[string]
@@ -171,7 +208,23 @@ function Invoke-ExchCollector_MB_DB_01_DatabaseHealth {
         $problems.Add(("Copy status could not be read for some databases: {0}" -f ($copyReadErrors -join '; '))) | Out-Null
         $outcomes.Add('Unknown') | Out-Null
     }
+    if ($statusUnread.Count -gt 0) {
+        $problems.Add(("{0} databases returned no status from their Information Store, so whether they are mounted, their size and their last full backup were not measured: {1}" -f `
+            $statusUnread.Count, (($statusUnread | ForEach-Object { $_.Name }) -join ', '))) | Out-Null
+        $outcomes.Add('Unknown') | Out-Null
+    }
+    if ($copyUnread.Count -gt 0) {
+        $problems.Add(("{0} database copies were returned without a status or queue length, so their health was not measured: {1}" -f `
+            $copyUnread.Count, (($copyUnread | ForEach-Object { $_.Copy }) -join ', '))) | Out-Null
+        $outcomes.Add('Unknown') | Out-Null
+    }
+    if ($statusWarnings.Count -gt 0) {
+        $problems.Add(("Exchange warned while reading database status: {0}" -f ((@($statusWarnings) | Select-Object -Unique) -join '; '))) | Out-Null
+        $outcomes.Add('Unknown') | Out-Null
+    }
     if ($problems.Count -eq 0) { $outcomes.Add('Compliant') | Out-Null }
+
+    $incomplete = ($copyReadErrors.Count -gt 0) -or ($statusUnread.Count -gt 0) -or ($copyUnread.Count -gt 0) -or ($statusWarnings.Count -gt 0)
 
     $outcome = Get-ExchWorstOutcome -Outcomes $outcomes.ToArray()
     $severity = switch ($outcome) {
@@ -185,7 +238,7 @@ function Invoke-ExchCollector_MB_DB_01_DatabaseHealth {
                  else { ("All {0} databases are mounted with {1} healthy copies, healthy content indexes and a recent full backup." -f $dbArr.Count, $copyArr.Count) }
 
     $finding = New-ExchControlFinding -Control $control -Severity $severity -Outcome $outcome `
-        -Sufficiency $(if ($copyReadErrors.Count -gt 0) { 'SoftFail' } else { 'Pass' }) `
+        -Sufficiency $(if ($incomplete) { 'SoftFail' } else { 'Pass' }) `
         -Rationale $rationale `
         -Evidence @($evidence) `
         -Remediation 'Mount failed databases, resolve unhealthy copies and content indexes, clear replication backlogs, and confirm a working backup covers every database.' `
@@ -199,8 +252,10 @@ function Invoke-ExchCollector_MB_DB_01_DatabaseHealth {
             backupStale     = $staleBackup.Count
             backupMissing   = $noBackup.Count
             circularLogging = $circular.Count
+            statusUnread    = $statusUnread.Count
+            copiesUnread    = $copyUnread.Count
         } `
-        -Meta @{ dataSources = @{ Exchange = @{ state = $(if ($copyReadErrors.Count -gt 0) { 'Partial' } else { 'Success' }); reason = ($copyReadErrors -join '; ') } }; evaluationStatus = 'Complete' }
+        -Meta @{ dataSources = @{ Exchange = @{ state = $(if ($incomplete) { 'Partial' } else { 'Success' }); reason = ((@($copyReadErrors) + @($statusWarnings)) -join '; ') } }; evaluationStatus = 'Complete' }
 
     return New-ExchCollectorResult -Sections $sections -Findings @($finding)
 }

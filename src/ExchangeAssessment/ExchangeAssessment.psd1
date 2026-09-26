@@ -1,6 +1,6 @@
 @{
     RootModule        = 'ExchangeAssessment.psm1'
-    ModuleVersion     = '0.6.0'
+    ModuleVersion     = '0.7.0'
     GUID              = 'ea1e88ee-6d63-40ec-bb48-4a715579c109'
     Author            = 'Carlos Annes'
     CompanyName       = 'Caannes IT Consulting'
