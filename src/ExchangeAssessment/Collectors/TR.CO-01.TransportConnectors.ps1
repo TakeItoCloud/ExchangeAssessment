@@ -150,8 +150,8 @@ function Invoke-ExchCollector_TR_CO_01_TransportConnectors {
     $noTls = @($sendArr | Where-Object { $_.Assessable -and $_.Enabled -and $_.ToInternet -and $requiredTlsLevels.Count -gt 0 -and ($requiredTlsLevels -notcontains $_.TlsAuthLevel) })
     $basicAuth = @($recvArr | Where-Object {
         $row = $_
-        -not $row.UnreadableProperties -and $row.Enabled -and
-        @($discouragedAuth | Where-Object { $row.AuthMechanism -match [regex]::Escape($_) }).Count -gt 0 -and -not $row.RequireTLS
+        -not $row.UnreadableProperties -and $row.Enabled -and -not $row.RequireTLS -and
+        (Test-ExchAuthMechanismUnprotected -AuthMechanism $row.AuthMechanism -Discouraged $discouragedAuth)
     })
 
     $problems = New-Object System.Collections.Generic.List[string]
@@ -488,5 +488,34 @@ function Test-ExchUnrestrictedRange {
         if (($value -replace '\s', '') -match '^::-(ffff:){7}ffff$') { return $true }
     }
 
+    return $false
+}
+
+function Test-ExchAuthMechanismUnprotected {
+    <#
+    True when a receive connector offers a discouraged authentication mechanism in a form that
+    can carry credentials before TLS.
+
+    AuthMechanism is a flags value that reads as a comma-separated list, for example
+    'Tls, Integrated, BasicAuth, BasicAuthRequireTLS, ExchangeServer' - the shipped default on
+    Exchange's own connectors. It is compared mechanism by mechanism, never as a substring: a
+    substring test for 'BasicAuth' also matches 'BasicAuthRequireTLS' and calls every default
+    connector unprotected, which the first live run did for 34 of them. BasicAuthRequireTLS is
+    "Offer basic authentication only after starting TLS"
+    (https://learn.microsoft.com/exchange/mail-flow/connectors/receive-connectors#receive-connector-authentication-mechanisms,
+    read 2026-09-26), so a connector that carries it does not offer Basic in the clear.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()][AllowEmptyString()][string]$AuthMechanism,
+        [Parameter()][string[]]$Discouraged = @()
+    )
+
+    $mechanisms = @(([string]$AuthMechanism -split '[,;\s]+') | Where-Object { $_ })
+    if ($mechanisms -contains 'BasicAuthRequireTLS') { return $false }
+
+    foreach ($name in @($Discouraged)) {
+        if ($name -and ($mechanisms -contains $name)) { return $true }
+    }
     return $false
 }

@@ -325,11 +325,10 @@ function Invoke-ExchWithWarningCapture {
     warnings of the kinds Get-MailboxDatabase -Status and Get-DatabaseAvailabilityGroup -Status
     write reached the console and none reached the run's report.
 
-    The warning stream is merged into output (3>&1) and split back out by type as it streams, so
-    the caller receives exactly what the command returned, including what it returned before a
-    failure. A terminating error still propagates. Each
-    warning goes to the run log and the run's error list with severity Warning, is echoed once
-    to the console prefixed with the query that raised it, and is added to -Warnings when given.
+    The caller receives exactly what the command returned, including what it returned before a
+    failure. A terminating error still propagates. Each distinct warning goes to the run log and
+    the run's error list once, with severity Warning and the count each capture path saw, and is
+    added to -Warnings when given. How the warnings are caught is described in the body.
 
     Variable names are prefixed because $Script runs with dynamic scope and may read variables
     of the collector that built it; a plain $item or $message here would shadow them.
@@ -343,13 +342,55 @@ function Invoke-ExchWithWarningCapture {
         [Parameter()][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Warnings
     )
 
+    # Two capture paths, because the Exchange Management Shell needs the second.
+    # 1. The warning stream is merged into output (3>&1) and split back out by type as it
+    #    streams. This catches warnings from local commands, but measured on the second live
+    #    run it caught none of the warnings Exchange's remote-session commands printed.
+    # 2. -WarningVariable is set as a default for every command the script calls, through a
+    #    copy of $PSDefaultParameterValues local to this function, so the caller's defaults and
+    #    the global ones are untouched. In the same shell, -WarningVariable on the cmdlet did
+    #    capture. The '+' form appends to the list declared here.
+    # A warning can reach both paths; each distinct message is recorded once, with the raw count
+    # each path saw. Those counts are capture counts, not occurrences: the variable path can
+    # count one warning more than once when the command calls further functions that inherit
+    # the default. Warnings are recorded in a finally block, so a query that warns and then fails
+    # still records them.
+    #
     # Output is passed through as it arrives, not buffered. A query that returns some objects and
     # then fails keeps what it returned - the caller still sees the failure, and Invoke-ExchQuery
-    # still records it - which is how the plain `& $Script` it replaced behaved. Buffering would
-    # discard one server's results because another server did not answer.
-    & $Script 3>&1 | ForEach-Object {
-        if ($_ -is [System.Management.Automation.WarningRecord]) {
-            $exchCaptureMessage = [string]$_.Message
+    # still records it - which is how the plain `& $Script` it replaced behaved.
+    $exchCaptureVariable = New-Object System.Collections.ArrayList
+    $exchCaptureStreamed = New-Object System.Collections.Generic.List[string]
+
+    $exchCaptureDefaults = @{}
+    if ($PSDefaultParameterValues) { foreach ($exchCaptureKey in @($PSDefaultParameterValues.Keys)) { $exchCaptureDefaults[$exchCaptureKey] = $PSDefaultParameterValues[$exchCaptureKey] } }
+    $exchCaptureDefaults['*:WarningVariable'] = '+exchCaptureVariable'
+    $PSDefaultParameterValues = $exchCaptureDefaults
+
+    try {
+        & $Script 3>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.WarningRecord]) { $exchCaptureStreamed.Add([string]$_.Message) | Out-Null }
+            else { $_ }
+        }
+    }
+    finally {
+        $exchCaptureCounts = [ordered]@{}
+        foreach ($exchCaptureSource in @(
+                @{ Name = 'stream';   Messages = @($exchCaptureStreamed.ToArray()) },
+                @{ Name = 'variable'; Messages = @($exchCaptureVariable | ForEach-Object { if ($_ -is [System.Management.Automation.WarningRecord]) { [string]$_.Message } else { [string]$_ } }) })) {
+            $exchCaptureTally = @{}
+            foreach ($exchCaptureText in $exchCaptureSource.Messages) {
+                if (-not $exchCaptureText) { continue }
+                $exchCaptureTally[$exchCaptureText] = 1 + $(if ($exchCaptureTally.ContainsKey($exchCaptureText)) { $exchCaptureTally[$exchCaptureText] } else { 0 })
+            }
+            foreach ($exchCaptureText in $exchCaptureTally.Keys) {
+                if (-not $exchCaptureCounts.Contains($exchCaptureText)) { $exchCaptureCounts[$exchCaptureText] = @{ stream = 0; variable = 0 } }
+                $exchCaptureCounts[$exchCaptureText][$exchCaptureSource.Name] = $exchCaptureTally[$exchCaptureText]
+            }
+        }
+
+        foreach ($exchCaptureMessage in @($exchCaptureCounts.Keys)) {
+            $exchCaptureSeen = $exchCaptureCounts[$exchCaptureMessage]
             if ($null -ne $Warnings) { $Warnings.Add(("{0}: {1}" -f $Label, $exchCaptureMessage)) | Out-Null }
             if ($Run) {
                 $exchCaptureRecord = New-Object System.Management.Automation.ErrorRecord(
@@ -359,14 +400,14 @@ function Invoke-ExchWithWarningCapture {
                     $null)
                 try {
                     $null = Write-ExchError -Run $Run -Context ('{0} (warning)' -f $Label) -ErrorRecord $exchCaptureRecord `
-                        -ControlId $ControlId -Severity 'Warning' -Data @{ stream = 'Warning' }
+                        -ControlId $ControlId -Severity 'Warning' `
+                        -Data @{ stream = 'Warning'; capturedByStream = $exchCaptureSeen.stream; capturedByVariable = $exchCaptureSeen.variable }
                 }
                 catch { Write-Warning ("Could not record a warning from {0}: {1}" -f $Label, $_.Exception.Message) }
             }
-            Write-Warning ("{0}: {1}" -f $Label, $exchCaptureMessage)
-        }
-        else {
-            $_
+            # A warning taken off the stream was not printed; echo it once. One caught only by the
+            # variable was already printed by the command itself.
+            if ($exchCaptureSeen.stream -gt 0) { Write-Warning ("{0}: {1}" -f $Label, $exchCaptureMessage) }
         }
     }
 }

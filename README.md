@@ -90,10 +90,14 @@ so a slow or skipped control is obvious at a glance.
 Exchange reports a partial read as a **warning**, not an error: a mailbox database whose
 Information Store could not be reached still comes back, with its status fields empty, and the
 cmdlet writes "Exchange can't connect to the Information Store service on server ..." to the
-console. Those warnings are recorded too - each one appears in `run.errors.csv` with severity
-`Warning` and the context `<query> (warning)`, and is echoed once to the console prefixed with the
-query that raised it. `MB.DB-01` and `DAG-01` report a verdict read under such warnings as
-`Unknown` rather than as complete.
+console. Those warnings are recorded too - each distinct one appears once in `run.errors.csv`
+with severity `Warning` and the context `<query> (warning)`. They are caught two ways: from the
+warning stream, and through `-WarningVariable`, which the tool sets as a default for every command
+a query runs. The second is the one that works in the Exchange Management Shell: on the second
+live run the stream caught none of the warnings Exchange's remote commands printed, while
+`-WarningVariable` on the cmdlet did. The console output is unchanged - Exchange still prints its
+own warnings. `MB.DB-01` and `DAG-01` report a verdict read under such warnings as `Unknown` rather
+than as complete.
 
 A property Exchange did not return is not read as a value. Where a verdict depends on it, the
 object's row names it in an `UnreadableFields` column and the control reports `Unknown` for that
@@ -135,7 +139,11 @@ requirements follow, both stated in Microsoft Learn's
 
 Microsoft's own guidance for listing Defender exclusions on an Exchange server also runs
 `Get-MpPreference` in an elevated session. If the `HideExclusionsFromLocalAdmins` policy is set,
-exclusions are not visible even to administrators; see PORT-PLAN P3.6.
+exclusions are not visible even to administrators. `MB.AV-01` therefore reports a server as
+**not assessed**, naming the reason, when Defender returns no exclusions at all (none configured
+and hidden look the same), returns its "N/A" placeholder instead of the list, or is not the
+primary anti-malware product (`AMRunningMode` other than Normal). Only a server that returned a
+real exclusion list is compared against the recommended one.
 
 Seven controls need a little more, and say so in their output rather than failing:
 
