@@ -15,7 +15,12 @@ evaluate" from "passed", and the analyzer suspensions below are gone.
 | --- | --- | --- | --- |
 | P1 | Extraction onto template-ps-tool: manifest hygiene, smoke tests, CI green | Done | 2026-08-13 |
 | P2 | Retire the four analyzer suspensions (see *Inherited analyzer debt*) | Mostly done | 2026-08-31 |
-| P3 | Runtime verification against a live Exchange organisation | Planned | |
+| P3 | Runtime verification against a live Exchange organisation | In progress - first live run 2026-09-26 (see *P3*); fixes are P3.1, re-run is P3.2 | 2026-09-26 |
+| P3.1 | Fix what the first live run exposed: four collectors crashed on properties real objects do not carry, four passed deserialized identities back to cmdlets, sizes read with `ToBytes()`, `PTCH-01` called a script as a cmdlet, cmdlet warnings were lost, and `MB.DB-01`/`CAS-01` reported unread values as measured (see *P3*) | In progress - green over mocks; the run that proves it is P3.2 | 2026-09-26 |
+| P3.2 | Re-run `Invoke-ExchAssess.ps1` on the same organisation after P3.1 and compare `run.errors.csv` against the first run - owner: Carlos Annes (operator) | Planned | |
+| P3.3 | Reported by P3.1: `Test-ExchPolicyBlocksBasicAuth` (`CAS-01`) treats a protocol property a policy does not carry as blocked, so an absent property reads as a pass; read the on-premises authentication policy property set on Learn and make an absent one Unknown | Planned | |
+| P3.4 | Reported by P3.1: only the four collectors that crashed were moved to guarded property reads. The others still read Exchange object properties directly under strict mode; audit them against Learn and the P3.2 run | Planned | |
+| P3.5 | Reported by P3.1: warnings are now recorded for every query, but only `DAG-01` and `MB.DB-01` judge on them. `SRV-01`, `CERT-01`, `EX.VDIR-01` and `TR.QUE-01` read per-server state that Exchange reports partially through warnings; decide per control whether a warning makes its verdict Unknown | Planned | |
 | P4 | Finish the AV exclusion check — compare, do not just report | Done | 2026-08-31 |
 | P5 | Operational health checks: service, mail flow, replication, queues, index | Done | 2026-09-01 |
 | P6 | Ignore list, alerting and scheduled-run modes | Dropped | 2026-09-02 |
@@ -69,7 +74,8 @@ Two of the four suspensions are gone as of P9 and now fail the build.
 
 The extraction was gated on static analysis and smoke tests only. No collector has been run
 against an Exchange organisation from this repository. Run a full
-`Invoke-ExchAssess.ps1` against a lab organisation and confirm: all 32 collectors return, the
+`Invoke-ExchAssess.ps1` against a lab organisation and confirm: all 34 on-premises collectors (38 with
+`-IncludeExchangeOnline`) return, the
 hash manifest covers every file the run produced, `csv/` holds one file per inventory section
 plus `findings.csv`, `run.collectors.csv` and `run.errors.csv`, and `assessment.json` parses
 and carries `inventory`, `findings` and `controls`. Then confirm that every control reports
@@ -79,6 +85,43 @@ Two things to shake out specifically, because CI cannot: the relay permission re
 `TR.CO-01` needs rights to run `Get-ADPermission` against receive connectors, and `TR.QUE-01`
 needs to reach every transport server. Both report `Unknown` per object rather than failing,
 so the run will succeed either way — check the counts.
+
+**First live run - 2026-09-26.** One full run from the Exchange Management Shell on an Exchange
+2019 server of a multi-server organisation with a DAG. The run completed and wrote every output.
+`run.errors.csv` held 140 rows. No client value is recorded here; the run folder stays with the
+operator. What it showed, by cause:
+
+- **Four collectors aborted on a property the real object does not carry**, under strict mode:
+  `DAG-01` (`Databases` on a DAG), `AA.SPAM-01` (`Name` on a transport agent, which returns
+  `Identity`), `HYB-01` (`TargetSharingEpr` on an intra-organization connector) and `CAS-01`
+  (`AllowSimpleDevicePassword`; mobile device policies carry `AllowSimplePassword`).
+- **Four passed a deserialized identity back to a cmdlet.** The Exchange Management Shell is a
+  remote session, so `$x.Identity` arrives as a deserialized `ADObjectId` that
+  `Get-MailboxDatabaseCopyStatus`, `Test-MAPIConnectivity` and `Get-MailboxStatistics` refuse to
+  bind (30 and 20 rows, and five mailbox rows - the collector logs only its first five mailbox
+  failures, so the full count was not recorded). `Get-ADPermission` could not resolve a receive
+  connector's `SERVER\Connector` identity string (58 rows); each connector it failed on is
+  reported with its relay right `Unknown` - the fail-closed path working as designed. The errors
+  file shows failures only, so how many connectors were read successfully is not known from it.
+- **Sizes** were read with `ToBytes()`. Not measured by this run - the `MB.DB-01` read swallowed
+  its failure into an empty size, and `MB.INV-01` failed on the identity first - but a
+  deserialized size is expected to arrive as its text form without that method. P3.1 reads both
+  forms; P3.2 shows which one the organisation returns.
+- **`PTCH-01` called `Get-Mitigations`**, which is a script in the Exchange `Scripts` folder, not a
+  cmdlet.
+- **Exchange's own warnings were lost.** Unreachable Information Store, cluster and Active Manager
+  calls on two DAG members were written as console warnings only; the report did not carry them,
+  and `MB.DB-01` would have reported those databases as dismounted (`[bool]$null`) with queue
+  lengths of 0.
+- **`CAS-01` would have reported "no authentication policy exists"** as `NonCompliant` when the
+  account was refused `Get-AuthenticationPolicy` by RBAC.
+- Environment, not tool: two DAG members answered no RPC, WMI or IIS call from the assessment
+  host, and WinRM loopback to the assessment host was refused for `MB.AV-01` and `TLS-01`, which
+  need local administrative rights as the README states.
+
+P3.1 fixes the tool defects. Each fix has a regression test built from the shape measured, with
+fictional values, and each test was shown red with the old code restored. Green over mocks proves
+the mocks: P3.2 is the run that shows the fixes hold.
 
 ### P4 — Finish the AV exclusion check — Done 2026-08-31
 

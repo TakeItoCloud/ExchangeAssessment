@@ -293,10 +293,13 @@ function Invoke-ExchQuery {
         [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Errors,
         [Parameter(Mandatory)][scriptblock]$Script,
         [Parameter()]$Run,
-        [Parameter()][string]$ControlId = ''
+        [Parameter()][string]$ControlId = '',
+        # Optional: receives '<Label>: <warning>' for every warning the query wrote, for a
+        # collector whose verdict depends on whether the read was complete.
+        [Parameter()][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Warnings
     )
 
-    try { return & $Script }
+    try { return Invoke-ExchWithWarningCapture -Label $Label -Script $Script -Run $Run -ControlId $ControlId -Warnings $Warnings }
     catch {
         $Errors.Add(("{0}: {1}" -f $Label, $_.Exception.Message)) | Out-Null
 
@@ -307,4 +310,60 @@ function Invoke-ExchQuery {
 
         return @()
     }
+}
+
+function Invoke-ExchWithWarningCapture {
+    <#
+    Runs one Exchange command and records every warning it writes, instead of letting the
+    warnings scroll past on the console and nowhere else.
+
+    Exchange reports partial reads as warnings, not errors: "Exchange can't connect to the
+    Information Store service on server ...", a cluster API failure, an Active Manager call
+    that failed. The objects still come back, with the unreadable fields left empty. Without
+    this, the report shows the empty fields and the reason exists only in the operator's
+    scrollback - as on the first live run, where Information Store, cluster and Active Manager
+    warnings of the kinds Get-MailboxDatabase -Status and Get-DatabaseAvailabilityGroup -Status
+    write reached the console and none reached the run's report.
+
+    The warning stream is merged into output (3>&1) and split back out by type, so the caller
+    receives exactly what the command returned. A terminating error still propagates. Each
+    warning goes to the run log and the run's error list with severity Warning, is echoed once
+    to the console prefixed with the query that raised it, and is added to -Warnings when given.
+
+    Variable names are prefixed because $Script runs with dynamic scope and may read variables
+    of the collector that built it; a plain $item or $message here would shadow them.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Label,
+        [Parameter(Mandatory)][scriptblock]$Script,
+        [Parameter()]$Run,
+        [Parameter()][string]$ControlId = '',
+        [Parameter()][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Warnings
+    )
+
+    $exchCaptureOutput = New-Object System.Collections.Generic.List[object]
+    foreach ($exchCaptureItem in @(& $Script 3>&1)) {
+        if ($exchCaptureItem -is [System.Management.Automation.WarningRecord]) {
+            $exchCaptureMessage = [string]$exchCaptureItem.Message
+            if ($null -ne $Warnings) { $Warnings.Add(("{0}: {1}" -f $Label, $exchCaptureMessage)) | Out-Null }
+            if ($Run) {
+                $exchCaptureRecord = New-Object System.Management.Automation.ErrorRecord(
+                    (New-Object System.Exception($exchCaptureMessage)),
+                    'ExchangeCommandWarning',
+                    [System.Management.Automation.ErrorCategory]::NotSpecified,
+                    $null)
+                try {
+                    $null = Write-ExchError -Run $Run -Context ('{0} (warning)' -f $Label) -ErrorRecord $exchCaptureRecord `
+                        -ControlId $ControlId -Severity 'Warning' -Data @{ stream = 'Warning' }
+                }
+                catch { Write-Warning ("Could not record a warning from {0}: {1}" -f $Label, $_.Exception.Message) }
+            }
+            Write-Warning ("{0}: {1}" -f $Label, $exchCaptureMessage)
+            continue
+        }
+        $exchCaptureOutput.Add($exchCaptureItem) | Out-Null
+    }
+
+    return $exchCaptureOutput.ToArray()
 }

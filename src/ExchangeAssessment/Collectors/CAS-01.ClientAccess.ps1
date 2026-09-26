@@ -26,64 +26,76 @@ function Invoke-ExchCollector_CAS_01_ClientAccess {
     $casMailboxes = @(Invoke-ExchQuery -Label 'Get-CASMailbox'             -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-CASMailbox -ResultSize 5000 -ErrorAction Stop })
     $devices      = @(Invoke-ExchQuery -Label 'Get-MobileDevice'           -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-MobileDevice -ResultSize 5000 -ErrorAction Stop })
 
+    # Every property read below is guarded. The first live run lost this whole control to one
+    # property name that mobile device policies do not carry, under strict mode. Inventory-only
+    # fields become a blank cell when absent; fields a verdict depends on are listed in
+    # UnreadableFields and make that verdict Unknown.
     $authRows = foreach ($p in $authPolicies) {
         [pscustomobject]@{
-            Name                        = [string]$p.Name
-            AllowBasicAuthActiveSync    = (ConvertTo-ExchFlatValue -Value $p.AllowBasicAuthActiveSync)
-            AllowBasicAuthAutodiscover  = (ConvertTo-ExchFlatValue -Value $p.AllowBasicAuthAutodiscover)
-            AllowBasicAuthImap          = (ConvertTo-ExchFlatValue -Value $p.AllowBasicAuthImap)
-            AllowBasicAuthMapi          = (ConvertTo-ExchFlatValue -Value $p.AllowBasicAuthMapi)
-            AllowBasicAuthOutlookService= (ConvertTo-ExchFlatValue -Value $p.AllowBasicAuthOutlookService)
-            AllowBasicAuthPop           = (ConvertTo-ExchFlatValue -Value $p.AllowBasicAuthPop)
-            AllowBasicAuthPowershell    = (ConvertTo-ExchFlatValue -Value $p.AllowBasicAuthPowershell)
-            AllowBasicAuthRpc           = (ConvertTo-ExchFlatValue -Value $p.AllowBasicAuthRpc)
-            AllowBasicAuthWebServices   = (ConvertTo-ExchFlatValue -Value $p.AllowBasicAuthWebServices)
+            Name                        = [string](Get-ExchObjectValue -InputObject $p -Name 'Name' -Default '')
+            AllowBasicAuthActiveSync    = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'AllowBasicAuthActiveSync'))
+            AllowBasicAuthAutodiscover  = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'AllowBasicAuthAutodiscover'))
+            AllowBasicAuthImap          = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'AllowBasicAuthImap'))
+            AllowBasicAuthMapi          = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'AllowBasicAuthMapi'))
+            AllowBasicAuthOutlookService= (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'AllowBasicAuthOutlookService'))
+            AllowBasicAuthPop           = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'AllowBasicAuthPop'))
+            AllowBasicAuthPowershell    = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'AllowBasicAuthPowershell'))
+            AllowBasicAuthRpc           = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'AllowBasicAuthRpc'))
+            AllowBasicAuthWebServices   = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'AllowBasicAuthWebServices'))
         }
     }
     $authArr = @($authRows)
 
-    $defaultAuthPolicy = ''
-    if ($orgConfig) {
-        $prop = $orgConfig.PSObject.Properties.Match('DefaultAuthenticationPolicy') | Select-Object -First 1
-        if ($prop) { $defaultAuthPolicy = [string]$prop.Value }
+    # '' is a measured "no default policy"; $null is "not read" - the query failed or the
+    # organization config did not carry the property - and the two reach different verdicts.
+    $defaultAuthPolicy = $null
+    if ($orgConfig -and (Test-ExchObjectProperty -InputObject $orgConfig -Name 'DefaultAuthenticationPolicy')) {
+        $defaultAuthPolicy = [string](Get-ExchObjectValue -InputObject $orgConfig -Name 'DefaultAuthenticationPolicy' -Default '')
     }
 
     $owaRows = foreach ($p in $owaPolicies) {
         [pscustomobject]@{
-            Name                = [string]$p.Name
-            IsDefault           = (ConvertTo-ExchFlatValue -Value $p.IsDefault)
-            DirectFileAccessOnPublicComputersEnabled  = (ConvertTo-ExchFlatValue -Value $p.DirectFileAccessOnPublicComputersEnabled)
-            DirectFileAccessOnPrivateComputersEnabled = (ConvertTo-ExchFlatValue -Value $p.DirectFileAccessOnPrivateComputersEnabled)
-            ActiveSyncIntegrationEnabled = (ConvertTo-ExchFlatValue -Value $p.ActiveSyncIntegrationEnabled)
-            ExplicitLogonEnabled= (ConvertTo-ExchFlatValue -Value $p.ExplicitLogonEnabled)
+            Name                = [string](Get-ExchObjectValue -InputObject $p -Name 'Name' -Default '')
+            IsDefault           = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'IsDefault'))
+            DirectFileAccessOnPublicComputersEnabled  = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'DirectFileAccessOnPublicComputersEnabled'))
+            DirectFileAccessOnPrivateComputersEnabled = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'DirectFileAccessOnPrivateComputersEnabled'))
+            ActiveSyncIntegrationEnabled = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'ActiveSyncIntegrationEnabled'))
+            ExplicitLogonEnabled= (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'ExplicitLogonEnabled'))
         }
     }
 
+    # Mobile device mailbox policies carry AllowSimplePassword. AllowSimpleDevicePassword is the
+    # name on the older ActiveSync mailbox policy cmdlets, which Exchange 2013 and later replace.
+    # Source: https://learn.microsoft.com/powershell/module/exchangepowershell/set-mobiledevicemailboxpolicy?view=exchange-ps
+    # and .../set-activesyncmailboxpolicy?view=exchange-ps - read 2026-09-26.
     $easRows = foreach ($p in $easPolicies) {
         [pscustomobject]@{
-            Name                   = [string]$p.Name
-            IsDefault              = (ConvertTo-ExchFlatValue -Value $p.IsDefault)
-            PasswordEnabled        = (ConvertTo-ExchFlatValue -Value $p.PasswordEnabled)
-            MinPasswordLength      = [string]$p.MinPasswordLength
-            AllowSimpleDevicePassword = (ConvertTo-ExchFlatValue -Value $p.AllowSimpleDevicePassword)
-            RequireDeviceEncryption= (ConvertTo-ExchFlatValue -Value $p.RequireDeviceEncryption)
-            MaxInactivityTimeLock  = [string]$p.MaxInactivityTimeLock
-            AllowNonProvisionableDevices = (ConvertTo-ExchFlatValue -Value $p.AllowNonProvisionableDevices)
+            Name                   = [string](Get-ExchObjectValue -InputObject $p -Name 'Name' -Default '')
+            IsDefault              = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'IsDefault'))
+            PasswordEnabled        = (Get-ExchObjectBool -InputObject $p -Name 'PasswordEnabled')
+            MinPasswordLength      = [string](Get-ExchObjectValue -InputObject $p -Name 'MinPasswordLength' -Default '')
+            AllowSimplePassword    = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'AllowSimplePassword'))
+            RequireDeviceEncryption= (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'RequireDeviceEncryption'))
+            MaxInactivityTimeLock  = [string](Get-ExchObjectValue -InputObject $p -Name 'MaxInactivityTimeLock' -Default '')
+            AllowNonProvisionableDevices = (ConvertTo-ExchFlatValue -Value (Get-ExchObjectValue -InputObject $p -Name 'AllowNonProvisionableDevices'))
+            UnreadableFields       = (Get-ExchMissingProperty -InputObject $p -Name @('PasswordEnabled'))
         }
     }
 
+    $protocolProperties = @('OWAEnabled', 'ActiveSyncEnabled', 'PopEnabled', 'ImapEnabled', 'MAPIEnabled', 'EwsEnabled')
     $casRows = foreach ($m in $casMailboxes) {
         [pscustomobject]@{
-            Name                 = [string]$m.Name
-            PrimarySmtpAddress   = [string]$m.PrimarySmtpAddress
-            OWAEnabled           = (ConvertTo-ExchFlatValue -Value $m.OWAEnabled)
-            ActiveSyncEnabled    = (ConvertTo-ExchFlatValue -Value $m.ActiveSyncEnabled)
-            PopEnabled           = (ConvertTo-ExchFlatValue -Value $m.PopEnabled)
-            ImapEnabled          = (ConvertTo-ExchFlatValue -Value $m.ImapEnabled)
-            MAPIEnabled          = (ConvertTo-ExchFlatValue -Value $m.MAPIEnabled)
-            EwsEnabled           = (ConvertTo-ExchFlatValue -Value $m.EwsEnabled)
-            ActiveSyncMailboxPolicy = [string]$m.ActiveSyncMailboxPolicy
-            OwaMailboxPolicy     = [string]$m.OwaMailboxPolicy
+            Name                 = [string](Get-ExchObjectValue -InputObject $m -Name 'Name' -Default '')
+            PrimarySmtpAddress   = [string](Get-ExchObjectValue -InputObject $m -Name 'PrimarySmtpAddress' -Default '')
+            OWAEnabled           = (Get-ExchObjectBool -InputObject $m -Name 'OWAEnabled')
+            ActiveSyncEnabled    = (Get-ExchObjectBool -InputObject $m -Name 'ActiveSyncEnabled')
+            PopEnabled           = (Get-ExchObjectBool -InputObject $m -Name 'PopEnabled')
+            ImapEnabled          = (Get-ExchObjectBool -InputObject $m -Name 'ImapEnabled')
+            MAPIEnabled          = (Get-ExchObjectBool -InputObject $m -Name 'MAPIEnabled')
+            EwsEnabled           = (Get-ExchObjectBool -InputObject $m -Name 'EwsEnabled')
+            ActiveSyncMailboxPolicy = [string](Get-ExchObjectValue -InputObject $m -Name 'ActiveSyncMailboxPolicy' -Default '')
+            OwaMailboxPolicy     = [string](Get-ExchObjectValue -InputObject $m -Name 'OwaMailboxPolicy' -Default '')
+            UnreadableFields     = (Get-ExchMissingProperty -InputObject $m -Name $protocolProperties)
         }
     }
 
@@ -92,17 +104,17 @@ function Invoke-ExchCollector_CAS_01_ClientAccess {
     $deviceRows = foreach ($d in $devices) {
         $lastSync = $null
         $ageDays = $null
-        $prop = $d.PSObject.Properties.Match('WhenChangedUTC') | Select-Object -First 1
-        if ($prop -and $prop.Value) {
-            try { $lastSync = [datetime]$prop.Value; $ageDays = [math]::Round(($now - $lastSync).TotalDays, 1) } catch { $ageDays = $null }
+        $changed = Get-ExchObjectValue -InputObject $d -Name 'WhenChangedUTC'
+        if ($changed) {
+            try { $lastSync = [datetime]$changed; $ageDays = [math]::Round(($now - $lastSync).TotalDays, 1) } catch { $ageDays = $null }
         }
         [pscustomobject]@{
-            UserDisplayName = [string]$d.UserDisplayName
-            DeviceOS        = [string]$d.DeviceOS
-            DeviceType      = [string]$d.DeviceType
-            DeviceModel     = [string]$d.DeviceModel
-            ClientType      = [string]$d.ClientType
-            DeviceAccessState = [string]$d.DeviceAccessState
+            UserDisplayName = [string](Get-ExchObjectValue -InputObject $d -Name 'UserDisplayName' -Default '')
+            DeviceOS        = [string](Get-ExchObjectValue -InputObject $d -Name 'DeviceOS' -Default '')
+            DeviceType      = [string](Get-ExchObjectValue -InputObject $d -Name 'DeviceType' -Default '')
+            DeviceModel     = [string](Get-ExchObjectValue -InputObject $d -Name 'DeviceModel' -Default '')
+            ClientType      = [string](Get-ExchObjectValue -InputObject $d -Name 'ClientType' -Default '')
+            DeviceAccessState = [string](Get-ExchObjectValue -InputObject $d -Name 'DeviceAccessState' -Default '')
             LastChangedUtc  = $lastSync
             AgeDays         = $ageDays
             IsStale         = ($null -ne $ageDays -and $ageDays -gt $staleDays)
@@ -134,10 +146,10 @@ function Invoke-ExchCollector_CAS_01_ClientAccess {
             -Columns @('Name', 'IsDefault', 'DirectFileAccessOnPublicComputersEnabled', 'DirectFileAccessOnPrivateComputersEnabled', 'ActiveSyncIntegrationEnabled', 'ExplicitLogonEnabled') -Rows $owaArr
 
         New-ExchInventorySection -Run $Run -Key 'client.mobile-device-policies' -Title 'Mobile Device Mailbox Policies' -Area 'Client' `
-            -Columns @('Name', 'IsDefault', 'PasswordEnabled', 'MinPasswordLength', 'AllowSimpleDevicePassword', 'RequireDeviceEncryption', 'MaxInactivityTimeLock', 'AllowNonProvisionableDevices') -Rows $easArr
+            -Columns @('Name', 'IsDefault', 'PasswordEnabled', 'MinPasswordLength', 'AllowSimplePassword', 'RequireDeviceEncryption', 'MaxInactivityTimeLock', 'AllowNonProvisionableDevices', 'UnreadableFields') -Rows $easArr
 
         New-ExchInventorySection -Run $Run -Key 'client.cas-mailboxes' -Title 'Per-Mailbox Client Protocols' -Area 'Client' `
-            -Columns @('Name', 'PrimarySmtpAddress', 'OWAEnabled', 'ActiveSyncEnabled', 'PopEnabled', 'ImapEnabled', 'MAPIEnabled', 'EwsEnabled', 'ActiveSyncMailboxPolicy', 'OwaMailboxPolicy') `
+            -Columns @('Name', 'PrimarySmtpAddress', 'OWAEnabled', 'ActiveSyncEnabled', 'PopEnabled', 'ImapEnabled', 'MAPIEnabled', 'EwsEnabled', 'ActiveSyncMailboxPolicy', 'OwaMailboxPolicy', 'UnreadableFields') `
             -Rows $casArr -HighCardinality
 
         New-ExchInventorySection -Run $Run -Key 'client.mobile-devices' -Title 'Mobile Devices' -Area 'Client' `
@@ -153,7 +165,19 @@ function Invoke-ExchCollector_CAS_01_ClientAccess {
     $problems = New-Object System.Collections.Generic.List[string]
     $outcomes = New-Object System.Collections.Generic.List[string]
 
-    if ($requireAuthPolicy -and $authArr.Count -eq 0) {
+    # A population that could not be read is not an empty one. Each check below first asks
+    # whether the query it depends on succeeded; the first live run's account was refused
+    # Get-AuthenticationPolicy by RBAC, and "no authentication policy exists" would have been
+    # reported as NonCompliant about policies nobody had read.
+    $failedQueries = @($errors | ForEach-Object { ($_ -split ':', 2)[0] })
+    $authRead    = ($failedQueries -notcontains 'Get-AuthenticationPolicy')
+    $easRead     = ($failedQueries -notcontains 'Get-MobileDeviceMailboxPolicy')
+
+    if (-not $authRead) {
+        $problems.Add('Authentication policies could not be read, so whether Basic authentication is blocked is unknown') | Out-Null
+        $outcomes.Add('Unknown') | Out-Null
+    }
+    elseif ($requireAuthPolicy -and $authArr.Count -eq 0) {
         $problems.Add('No authentication policy exists, so Basic authentication is available on every protocol') | Out-Null
         $outcomes.Add('NonCompliant') | Out-Null
     }
@@ -163,10 +187,21 @@ function Invoke-ExchCollector_CAS_01_ClientAccess {
             $problems.Add(("No authentication policy blocks Basic authentication on every protocol; {0} policies exist and each still permits it somewhere" -f $authArr.Count)) | Out-Null
             $outcomes.Add('NonCompliant') | Out-Null
         }
-        if ($requireDefault -and -not $defaultAuthPolicy) {
+        if ($requireDefault -and $null -eq $defaultAuthPolicy) {
+            $problems.Add('The organisation default authentication policy could not be read, so whether mailboxes without an explicit assignment are protected is unknown') | Out-Null
+            $outcomes.Add('Unknown') | Out-Null
+        }
+        elseif ($requireDefault -and -not $defaultAuthPolicy) {
             $problems.Add('No authentication policy is set as the organisation default, so mailboxes without an explicit assignment are unprotected') | Out-Null
             $outcomes.Add('NonCompliant') | Out-Null
         }
+    }
+
+    $unreadCas = @($casArr | Where-Object { $_.UnreadableFields })
+    if ($unreadCas.Count -gt 0) {
+        $problems.Add(("{0} mailboxes were returned without some protocol settings, so whether those protocols are enabled on them is unknown: {1}" -f $unreadCas.Count, `
+            ((@($unreadCas | ForEach-Object { $_.UnreadableFields -split ';' }) | Select-Object -Unique) -join ', '))) | Out-Null
+        $outcomes.Add('Unknown') | Out-Null
     }
 
     foreach ($protocol in $discouraged) {
@@ -178,12 +213,23 @@ function Invoke-ExchCollector_CAS_01_ClientAccess {
         }
     }
 
-    if ($requireEasPolicy -and $easArr.Count -eq 0 -and $deviceArr.Count -gt 0) {
+    if (-not $easRead) {
+        $problems.Add('Mobile device mailbox policies could not be read, so device password and policy coverage are unknown') | Out-Null
+        $outcomes.Add('Unknown') | Out-Null
+    }
+    elseif ($requireEasPolicy -and $easArr.Count -eq 0 -and $deviceArr.Count -gt 0) {
         $problems.Add(("{0} mobile devices are connected but no mobile device mailbox policy is defined" -f $deviceArr.Count)) | Out-Null
         $outcomes.Add('PartiallyCompliant') | Out-Null
     }
 
-    $weakEas = @($easArr | Where-Object { $_.PasswordEnabled -ne $true })
+    $unreadEas = @($easArr | Where-Object { $_.UnreadableFields })
+    if ($unreadEas.Count -gt 0) {
+        $problems.Add(("{0} mobile device policies were returned without PasswordEnabled, so whether they require a device password is unknown: {1}" -f $unreadEas.Count, `
+            (($unreadEas | ForEach-Object { $_.Name }) -join ', '))) | Out-Null
+        $outcomes.Add('Unknown') | Out-Null
+    }
+
+    $weakEas = @($easArr | Where-Object { $_.PasswordEnabled -eq $false })
     if ($weakEas.Count -gt 0) {
         $problems.Add(("{0} mobile device policies do not require a device password: {1}" -f $weakEas.Count, `
             (($weakEas | ForEach-Object { $_.Name }) -join ', '))) | Out-Null
@@ -202,6 +248,8 @@ function Invoke-ExchCollector_CAS_01_ClientAccess {
     }
     if ($problems.Count -eq 0) { $outcomes.Add('Compliant') | Out-Null }
 
+    $incomplete = ($errors.Count -gt 0) -or ($outcomes -contains 'Unknown')
+
     $outcome = Get-ExchWorstOutcome -Outcomes $outcomes.ToArray()
     $severity = switch ($outcome) {
         'NonCompliant'       { 'High' }
@@ -215,7 +263,7 @@ function Invoke-ExchCollector_CAS_01_ClientAccess {
                         $deviceArr.Count, $easArr.Count) }
 
     $finding = New-ExchControlFinding -Control $control -Severity $severity -Outcome $outcome `
-        -Sufficiency $(if ($errors.Count -gt 0) { 'SoftFail' } else { 'Pass' }) `
+        -Sufficiency $(if ($incomplete) { 'SoftFail' } else { 'Pass' }) `
         -Rationale $rationale `
         -Evidence @($evidence) `
         -Remediation 'Create an authentication policy that denies Basic authentication on every protocol, set it as the organisation default, and disable POP and IMAP on mailboxes that do not need them. Require a device password in every mobile device policy and remove stale device partnerships.' `
@@ -228,7 +276,7 @@ function Invoke-ExchCollector_CAS_01_ClientAccess {
             mobileDevices    = $deviceArr.Count
             staleDevices     = $stale.Count
         } `
-        -Meta @{ dataSources = @{ Exchange = @{ state = $(if ($errors.Count -gt 0) { 'Partial' } else { 'Success' }); reason = ($errors -join '; ') } }; evaluationStatus = 'Complete' }
+        -Meta @{ dataSources = @{ Exchange = @{ state = $(if ($incomplete) { 'Partial' } else { 'Success' }); reason = ($errors -join '; ') } }; evaluationStatus = 'Complete' }
 
     return New-ExchCollectorResult -Sections $sections -Findings @($finding)
 }

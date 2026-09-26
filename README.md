@@ -87,6 +87,19 @@ whoever reads the report rather than only to whoever reads the log.
 `csv/run.collectors.csv` lists every collector with its status, duration and what it produced,
 so a slow or skipped control is obvious at a glance.
 
+Exchange reports a partial read as a **warning**, not an error: a mailbox database whose
+Information Store could not be reached still comes back, with its status fields empty, and the
+cmdlet writes "Exchange can't connect to the Information Store service on server ..." to the
+console. Those warnings are recorded too - each one appears in `run.errors.csv` with severity
+`Warning` and the context `<query> (warning)`, and is echoed once to the console prefixed with the
+query that raised it. `MB.DB-01` and `DAG-01` report a verdict read under such warnings as
+`Unknown` rather than as complete.
+
+A property Exchange did not return is not read as a value. Where a verdict depends on it, the
+object's row names it in an `UnreadableFields` column and the control reports `Unknown` for that
+object - a database whose store did not answer is not called dismounted, and a connector whose
+`Enabled` was not returned is not called disabled.
+
 ## Requirements
 
 - **Windows PowerShell 5.1** — the module runs inside the Exchange Management Shell on an

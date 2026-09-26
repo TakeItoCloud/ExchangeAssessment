@@ -2940,6 +2940,446 @@ Describe 'ExchangeAssessment' {
         }
     }
 
+    Context 'First live run: remote session object shapes' {
+
+        # Every case here reproduces a failure measured on the first run against a real Exchange
+        # organisation (P3). The Exchange Management Shell is always a remote session, so what a
+        # collector receives are deserialized objects: an Identity that is a deserialized
+        # ADObjectId the cmdlets will not bind back, sizes as text, and properties that a given
+        # object type simply does not carry. The stubs below reproduce those three shapes with
+        # fictional names only; the rejection text is the one the real cmdlets returned.
+
+        BeforeAll {
+            Import-Module -Name $script:ManifestPath -Force -ErrorAction Stop
+
+            # Pester can only mock a command that exists. None of these exist off an Exchange
+            # server, so each is declared as an empty global stub (only when absent) and mocked.
+            $script:StubbedCommands = New-Object System.Collections.Generic.List[string]
+            $stubs = [ordered]@{
+                'Get-MailboxDatabase'                 = 'param([switch]$Status, $Identity)'
+                'Get-MailboxDatabaseCopyStatus'       = 'param($Identity)'
+                'Test-MAPIConnectivity'               = 'param($Database)'
+                'Test-ReplicationHealth'              = 'param($Identity)'
+                'Get-Mailbox'                         = 'param($ResultSize)'
+                'Get-MailboxStatistics'               = 'param($Identity)'
+                'Get-AcceptedDomain'                  = 'param()'
+                'Get-DatabaseAvailabilityGroup'       = 'param([switch]$Status)'
+                'Get-DatabaseAvailabilityGroupNetwork'= 'param($Identity)'
+                'Get-ADPermission'                    = 'param($Identity)'
+                'Get-TransportAgent'                  = 'param()'
+                'Get-MalwareFilteringServer'          = 'param()'
+                'Get-ContentFilterConfig'             = 'param()'
+                'Get-SenderFilterConfig'              = 'param()'
+                'Get-RecipientFilterConfig'           = 'param()'
+                'Get-SenderIdConfig'                  = 'param()'
+                'Get-SenderReputationConfig'          = 'param()'
+                'Get-HybridConfiguration'             = 'param()'
+                'Get-IntraOrganizationConnector'      = 'param()'
+                'Get-OrganizationConfig'              = 'param()'
+                'Get-AuthServer'                      = 'param()'
+                'Get-PartnerApplication'              = 'param()'
+                'Get-FederationTrust'                 = 'param()'
+                'Get-OrganizationRelationship'        = 'param()'
+                'Get-MigrationEndpoint'               = 'param()'
+                'Get-AuthenticationPolicy'            = 'param()'
+                'Get-OwaMailboxPolicy'                = 'param()'
+                'Get-MobileDeviceMailboxPolicy'       = 'param()'
+                'Get-ActiveSyncOrganizationSettings'  = 'param()'
+                'Get-CASMailbox'                      = 'param($ResultSize)'
+                'Get-MobileDevice'                    = 'param($ResultSize)'
+                'Get-ExchangeServer'                  = 'param()'
+                'Get-HotFix'                          = 'param($ComputerName)'
+                'Get-Mitigations'                     = 'param()'
+            }
+            foreach ($name in $stubs.Keys) {
+                if (Get-Command -Name $name -ErrorAction SilentlyContinue) { continue }
+                $null = New-Item -Path ('function:global:{0}' -f $name) -Value ([scriptblock]::Create(('[CmdletBinding()] {0}' -f $stubs[$name])))
+                $script:StubbedCommands.Add($name) | Out-Null
+            }
+
+            # A deserialized ADObjectId: renders as its name, but is not a string.
+            function New-TestRemoteId {
+                param([string]$Name)
+                $id = [pscustomobject]@{ Name = $Name; DistinguishedName = "CN=$Name,CN=Test,DC=example,DC=test" }
+                $id.PSObject.TypeNames.Insert(0, 'Deserialized.Microsoft.Exchange.Data.Directory.ADObjectId')
+                $id | Add-Member -MemberType ScriptMethod -Name ToString -Value { $this.Name } -Force
+                $id
+            }
+
+            # The rejection the real cmdlets returned for a deserialized identity.
+            function Assert-TestBindable {
+                param($Value, [string]$Parameter, [string]$TargetType)
+                if ($Value -isnot [string]) {
+                    throw ("Cannot process argument transformation on parameter '{0}'. Cannot convert the ""{1}"" value of type ""Deserialized.Microsoft.Exchange.Data.Directory.ADObjectId"" to type ""{2}""." -f $Parameter, $Value, $TargetType)
+                }
+            }
+
+            function New-TestRun {
+                param([hashtable]$Config = @{})
+                $folder = Join-Path -Path $TestDrive -ChildPath ('run-' + [guid]::NewGuid())
+                New-Item -ItemType Directory -Path (Join-Path -Path $folder -ChildPath 'evidence') -Force | Out-Null
+                [pscustomobject]@{
+                    RunId = 'test'; TenantHint = 'test'; RunFolder = $folder
+                    LogPath = (Join-Path -Path $folder -ChildPath 'run.jsonl'); ConfigPath = ''
+                    Config = $Config; Flags = @{}
+                    Errors = (New-Object System.Collections.Generic.List[object])
+                }
+            }
+
+            function Invoke-TestCollector {
+                param([string]$Function, $Run)
+                & (Get-Module $script:ModuleName) { param($f, $r) & $f -Run $r 3>$null } $Function $Run
+            }
+
+            function Get-TestSectionRows {
+                param($Result, [string]$Key)
+                @(@($Result.sections | Where-Object { $_.key -eq $Key })[0].allRows)
+            }
+
+            # Two databases on a DAG, as Get-MailboxDatabase -Status returns them remotely.
+            function New-TestDatabase {
+                param([string]$Name, $Mounted = $true, [string]$Size = '1.5 GB (1,610,612,736 bytes)', $LastFullBackup = (Get-Date).AddDays(-1))
+                [pscustomobject]@{
+                    Name = $Name; Identity = (New-TestRemoteId -Name $Name); Server = 'EX01'
+                    Mounted = $Mounted; DatabaseSize = $Size; LastFullBackup = $LastFullBackup
+                    EdbFilePath = "D:\DB\$Name.edb"; LogFolderPath = "L:\$Name"; CircularLoggingEnabled = $false
+                    ProhibitSendQuota = 'Unlimited'; ProhibitSendReceiveQuota = 'Unlimited'; IssueWarningQuota = 'Unlimited'
+                    MailboxRetention = '30.00:00:00'; DeletedItemRetention = '14.00:00:00'
+                    ActivationPreference = @('[EX01, 1]'); MasterServerOrAvailabilityGroup = 'DAG01'
+                }
+            }
+
+            function New-TestCopy {
+                param([string]$Database, [string]$Server = 'EX01', $CopyQueue = 0, $ReplayQueue = 0)
+                [pscustomobject]@{
+                    Name = "$Database\$Server"; Status = 'Mounted'; ActiveCopy = $true
+                    CopyQueueLength = $CopyQueue; ReplayQueueLength = $ReplayQueue; ContentIndexState = 'Healthy'
+                }
+            }
+
+            $script:DeclaredDatabases = @('DB01', 'DB02')
+        }
+
+        AfterAll {
+            foreach ($name in $script:StubbedCommands) { Remove-Item -Path ('function:global:{0}' -f $name) -ErrorAction SilentlyContinue }
+        }
+
+        It 'reads byte counts from the text a remote session returns, and never turns an unread size into 0' {
+            $convert = { param($v) & (Get-Module $script:ModuleName) { param($x) ConvertTo-ExchByteCount -Value $x } $v }
+
+            (& $convert '1.5 GB (1,610,612,736 bytes)') | Should -Be 1610612736
+            (& $convert '1,5 GB (1.610.612.736 bytes)') | Should -Be 1610612736
+            (& $convert '0 B (0 bytes)') | Should -Be 0
+            (& $convert 'Unlimited') | Should -BeNullOrEmpty
+            (& $convert '') | Should -BeNullOrEmpty
+            (& $convert $null) | Should -BeNullOrEmpty
+
+            $live = [pscustomobject]@{ Text = 'x' }
+            $live | Add-Member -MemberType ScriptMethod -Name ToBytes -Value { [uint64]2048 }
+            (& $convert $live) | Should -Be 2048
+        }
+
+        It 'records a warning a query writes in the run error list, and still returns its output' {
+            $run = New-TestRun
+            $warnings = New-Object System.Collections.Generic.List[string]
+            $out = & (Get-Module $script:ModuleName) {
+                param($r, $w)
+                Invoke-ExchWithWarningCapture -Label 'Get-Thing' -Run $r -ControlId 'TEST-01' -Warnings $w -Script {
+                    Write-Warning 'Exchange cannot reach the store on EX02 (test)'
+                    'first'; 'second'
+                } 3>$null
+            } $run $warnings
+
+            @($out) | Should -Be @('first', 'second')
+            $warnings.Count | Should -Be 1
+            $warnings[0] | Should -Be 'Get-Thing: Exchange cannot reach the store on EX02 (test)'
+            $run.Errors.Count | Should -Be 1
+            $run.Errors[0].severity | Should -Be 'Warning'
+            $run.Errors[0].controlId | Should -Be 'TEST-01'
+            $run.Errors[0].detail.message | Should -Be 'Exchange cannot reach the store on EX02 (test)'
+
+            { & (Get-Module $script:ModuleName) { Invoke-ExchWithWarningCapture -Label 'Get-Thing' -Script { throw 'boom (test)' } } } |
+                Should -Throw -ExpectedMessage 'boom (test)'
+        }
+
+        It 'MB.DB-01 requests copy status by database name and reads sizes from text' {
+            Mock -ModuleName $script:ModuleName Get-MailboxDatabase { foreach ($n in $script:DeclaredDatabases) { New-TestDatabase -Name $n } }
+            Mock -ModuleName $script:ModuleName Get-MailboxDatabaseCopyStatus {
+                Assert-TestBindable -Value $Identity -Parameter 'Identity' -TargetType 'Microsoft.Exchange.Configuration.Tasks.DatabaseCopyIdParameter'
+                New-TestCopy -Database $Identity
+            }
+
+            $run = New-TestRun
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_MB_DB_01_DatabaseHealth' -Run $run
+
+            $copies = Get-TestSectionRows -Result $result -Key 'mailbox.database-copies'
+            $copies.Count | Should -Be $script:DeclaredDatabases.Count -Because 'one copy per declared database must be read'
+            $databases = Get-TestSectionRows -Result $result -Key 'mailbox.databases'
+            $databases.Count | Should -Be $script:DeclaredDatabases.Count
+            foreach ($row in $databases) { $row.SizeGB | Should -Be 1.5 -Because "$($row.Name) reported 1.5 GB as text" }
+
+            $recorded = [string](@($run.Errors | ForEach-Object { '{0}: {1}' -f $_.context, $_.detail.message }) -join ' | ')
+            $recorded | Should -BeNullOrEmpty -Because 'no query may fail or warn on this data'
+            $result.findings[0].result.outcome | Should -Be 'Compliant'
+        }
+
+        It 'MB.DB-01 reports a database whose store did not answer as not measured, not as dismounted' {
+            Mock -ModuleName $script:ModuleName Get-MailboxDatabase {
+                Write-Warning "Exchange can't connect to the Information Store service on server EX02.example.test (test)."
+                New-TestDatabase -Name 'DB01'
+                New-TestDatabase -Name 'DB02' -Mounted $null -Size $null -LastFullBackup $null
+            }
+            Mock -ModuleName $script:ModuleName Get-MailboxDatabaseCopyStatus { New-TestCopy -Database $Identity }
+
+            $run = New-TestRun
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_MB_DB_01_DatabaseHealth' -Run $run
+            $finding = $result.findings[0]
+
+            $finding.result.outcome | Should -Be 'Unknown'
+            $finding.result.rationale | Should -Match 'returned no status from their Information Store.*DB02'
+            $finding.result.rationale | Should -Not -Match 'not mounted'
+            $finding.result.rationale | Should -Not -Match 'no full backup'
+            $finding.result.metrics.unmounted | Should -Be 0
+            $finding.result.metrics.statusUnread | Should -Be 1
+            @($run.Errors | Where-Object { $_.detail.message -like "*can't connect to the Information Store*" }).Count | Should -Be 1
+        }
+
+        It 'MB.DB-01 reports an unreadable queue length as not measured, not as 0' {
+            Mock -ModuleName $script:ModuleName Get-MailboxDatabase { New-TestDatabase -Name 'DB01' }
+            Mock -ModuleName $script:ModuleName Get-MailboxDatabaseCopyStatus { New-TestCopy -Database $Identity -CopyQueue $null }
+
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_MB_DB_01_DatabaseHealth' -Run (New-TestRun)
+            $copies = Get-TestSectionRows -Result $result -Key 'mailbox.database-copies'
+            $copies.Count | Should -Be 1
+            # Flattened for the report, an unmeasured value is an empty string. -eq would call
+            # '' equal to 0, so the type is asserted as well.
+            ($copies[0].CopyQueueLength -is [string] -and $copies[0].CopyQueueLength.Length -eq 0) | Should -BeTrue -Because 'an unread queue length must not be reported as 0'
+            $result.findings[0].result.outcome | Should -Be 'Unknown'
+            $result.findings[0].result.rationale | Should -Match 'without a status or queue length'
+        }
+
+        It 'REPL-01 tests MAPI connectivity by database name' {
+            Mock -ModuleName $script:ModuleName Get-DatabaseAvailabilityGroup { }
+            Mock -ModuleName $script:ModuleName Get-MailboxDatabase { foreach ($n in $script:DeclaredDatabases) { New-TestDatabase -Name $n } }
+            Mock -ModuleName $script:ModuleName Test-MAPIConnectivity {
+                Assert-TestBindable -Value $Database -Parameter 'Database' -TargetType 'Microsoft.Exchange.Configuration.Tasks.DatabaseIdParameter'
+                [pscustomobject]@{ Server = 'EX01'; Result = 'Success'; Latency = '00:00:00.01'; Error = '' }
+            }
+
+            $run = New-TestRun
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_REPL_01_ReplicationHealth' -Run $run
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Test-MAPIConnectivity -Times $script:DeclaredDatabases.Count -Exactly
+            @($run.Errors | Where-Object { $_.context -like 'Test-MAPIConnectivity*' }).Count | Should -Be 0
+            $result.findings | Should -Not -BeNullOrEmpty
+        }
+
+        It 'MB.INV-01 requests statistics by distinguished name and reads the size from text' {
+            $script:DeclaredMailboxes = @('User One', 'User Two', 'User Three')
+            Mock -ModuleName $script:ModuleName Get-Mailbox {
+                foreach ($n in $script:DeclaredMailboxes) {
+                    [pscustomobject]@{
+                        Name = $n; Identity = (New-TestRemoteId -Name $n); DistinguishedName = "CN=$n,OU=Users,DC=example,DC=test"
+                        Guid = [guid]::NewGuid(); PrimarySmtpAddress = ('{0}@contoso.com' -f ($n -replace ' ', '.')); RecipientTypeDetails = 'UserMailbox'
+                        # One quota is written with '.' digit grouping. Defensive, not measured: the
+                        # separator in that text is not something the first live run exercised.
+                        Database = 'DB01'; ProhibitSendQuota = $(if ($n -eq 'User Two') { '2 GB (2.147.483.648 bytes)' } else { '2 GB (2,147,483,648 bytes)' }); UseDatabaseQuotaDefaults = $false
+                        ArchiveState = 'None'; ArchiveDatabase = $null; LitigationHoldEnabled = $false; RetentionPolicy = ''
+                        HiddenFromAddressListsEnabled = $false; ForwardingAddress = $null; ForwardingSmtpAddress = $null
+                    }
+                }
+            }
+            Mock -ModuleName $script:ModuleName Get-AcceptedDomain { [pscustomobject]@{ DomainName = 'contoso.com' } }
+            Mock -ModuleName $script:ModuleName Get-MailboxStatistics {
+                Assert-TestBindable -Value $Identity -Parameter 'Identity' -TargetType 'Microsoft.Exchange.Configuration.Tasks.GeneralMailboxOrMailUserIdParameter'
+                if ($Identity -notlike 'CN=*') { throw "expected a distinguished name, got '$Identity' (test)" }
+                [pscustomobject]@{ TotalItemSize = '512 MB (536,870,912 bytes)'; ItemCount = 1200 }
+            }
+
+            $run = New-TestRun
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_MB_INV_01_MailboxInventory' -Run $run
+            $rows = Get-TestSectionRows -Result $result -Key 'mailbox.inventory'
+            $rows.Count | Should -Be $script:DeclaredMailboxes.Count
+            foreach ($row in $rows) {
+                $row.SizeGB | Should -Be 0.5 -Because "$($row.Name) reported 512 MB as text"
+                $row.ItemCount | Should -Be 1200
+                $row.QuotaGB | Should -Be 2
+            }
+            $result.findings[0].result.metrics.statisticsFailures | Should -Be 0
+            $recorded = [string](@($run.Errors | ForEach-Object { '{0}: {1}' -f $_.context, $_.detail.message }) -join ' | ')
+            $recorded | Should -BeNullOrEmpty -Because 'no query may fail or warn on this data'
+        }
+
+        It 'TR.CO-01 reads receive connector permissions by distinguished name' {
+            Mock -ModuleName $script:ModuleName Get-ADPermission {
+                if ($Identity -ne 'CN=Default Frontend EX01,CN=Protocols,CN=EX01,DC=example,DC=test') { throw "object '$Identity' couldn't be found (test)" }
+                [pscustomobject]@{ User = 'NT AUTHORITY\ANONYMOUS LOGON'; Deny = $false; IsInherited = $false; ExtendedRights = @('ms-Exch-SMTP-Submit') }
+            }
+            $connector = [pscustomobject]@{
+                Identity = 'EX01\Default Frontend EX01'; Name = 'Default Frontend EX01'
+                DistinguishedName = 'CN=Default Frontend EX01,CN=Protocols,CN=EX01,DC=example,DC=test'
+            }
+            $errors = New-Object System.Collections.Generic.List[string]
+            $right = & (Get-Module $script:ModuleName) {
+                param($c, $e) Test-ExchAnonymousRelayGranted -Connector $c -Errors $e -AnonymousPrincipals @('NT AUTHORITY\ANONYMOUS LOGON')
+            } $connector $errors
+
+            $right | Should -Be 'NotGranted'
+            $errors.Count | Should -Be 0
+        }
+
+        It 'DAG-01 reads a DAG that carries no Databases property, and counts its databases from the databases' {
+            Mock -ModuleName $script:ModuleName Get-DatabaseAvailabilityGroup {
+                [pscustomobject]@{
+                    Name = 'DAG01'; Servers = @('EX01', 'EX02', 'EX03'); OperationalServers = @('EX01', 'EX02', 'EX03')
+                    WitnessServer = 'FS01.example.test'; WitnessDirectory = 'C:\DAG01'; AlternateWitnessServer = ''; AlternateWitnessDirectory = ''
+                    NetworkNames = @('MapiNet'); DatabaseCopyAutoActivationPolicy = 'Unrestricted'; ReplicationPort = 64327
+                }
+            }
+            Mock -ModuleName $script:ModuleName Get-MailboxDatabase { foreach ($n in $script:DeclaredDatabases) { New-TestDatabase -Name $n } }
+            Mock -ModuleName $script:ModuleName Get-DatabaseAvailabilityGroupNetwork {
+                [pscustomobject]@{ Name = 'MapiNet'; ReplicationEnabled = $true; IgnoreNetwork = $false; Subnets = @('192.0.2.0/24'); Interfaces = @('EX01') }
+            }
+
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_DAG_01_DagHealth' -Run (New-TestRun)
+            $dags = Get-TestSectionRows -Result $result -Key 'mailbox.dags'
+            $dags.Count | Should -Be 1
+            $dags[0].DatabaseCount | Should -Be $script:DeclaredDatabases.Count
+            $dags[0].UnreadableFields | Should -Be ''
+            $result.findings[0].result.outcome | Should -Be 'Compliant'
+        }
+
+        It 'DAG-01 states the warnings it read status under, and does not call the result complete' {
+            Mock -ModuleName $script:ModuleName Get-DatabaseAvailabilityGroup {
+                Write-Warning 'An error occurred while attempting a cluster operation (test).'
+                [pscustomobject]@{
+                    Name = 'DAG01'; Servers = @('EX01', 'EX02', 'EX03'); OperationalServers = @('EX01', 'EX02', 'EX03')
+                    WitnessServer = 'FS01.example.test'; WitnessDirectory = 'C:\DAG01'
+                }
+            }
+            Mock -ModuleName $script:ModuleName Get-MailboxDatabase { }
+            Mock -ModuleName $script:ModuleName Get-DatabaseAvailabilityGroupNetwork { }
+
+            $run = New-TestRun
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_DAG_01_DagHealth' -Run $run
+            $result.findings[0].result.outcome | Should -Be 'Unknown'
+            $result.findings[0].result.rationale | Should -Match 'cluster operation'
+            @($run.Errors | Where-Object { $_.severity -eq 'Warning' }).Count | Should -Be 1
+        }
+
+        It 'DAG-01 does not judge a DAG whose member list was not returned' {
+            Mock -ModuleName $script:ModuleName Get-DatabaseAvailabilityGroup { [pscustomobject]@{ Name = 'DAG01'; WitnessServer = '' } }
+            Mock -ModuleName $script:ModuleName Get-MailboxDatabase { }
+            Mock -ModuleName $script:ModuleName Get-DatabaseAvailabilityGroupNetwork { }
+
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_DAG_01_DagHealth' -Run (New-TestRun)
+            $result.findings[0].result.outcome | Should -Be 'Unknown'
+            $result.findings[0].result.rationale | Should -Match 'DAG01 \(Servers;OperationalServers\)'
+            $result.findings[0].result.rationale | Should -Not -Match 'no witness'
+        }
+
+        It 'AA.SPAM-01 names transport agents by Identity, the property Get-TransportAgent returns' {
+            Mock -ModuleName $script:ModuleName Get-TransportAgent {
+                [pscustomobject]@{ Identity = 'Transport Rule Agent'; Enabled = $true; Priority = 1 }
+                [pscustomobject]@{ Identity = 'Malware Agent'; Enabled = $true; Priority = 5 }
+            }
+            Mock -ModuleName $script:ModuleName Get-MalwareFilteringServer { [pscustomobject]@{ Name = 'EX01'; BypassFiltering = $false } }
+
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_AA_SPAM_01_AntiMalwareSpam' -Run (New-TestRun)
+            $agents = Get-TestSectionRows -Result $result -Key 'security.transport-agents'
+            $agents.Count | Should -Be 2
+            ($agents | ForEach-Object { $_.Name }) | Should -Be @('Transport Rule Agent', 'Malware Agent')
+            $result.findings[0].result.rationale | Should -Not -Match 'No malware filtering agent'
+        }
+
+        It 'AA.SPAM-01 does not call a malware agent disabled when Enabled was not returned' {
+            Mock -ModuleName $script:ModuleName Get-TransportAgent { [pscustomobject]@{ Identity = 'Malware Agent'; Priority = 5 } }
+            Mock -ModuleName $script:ModuleName Get-MalwareFilteringServer { [pscustomobject]@{ Name = 'EX01'; BypassFiltering = $false } }
+
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_AA_SPAM_01_AntiMalwareSpam' -Run (New-TestRun)
+            $result.findings[0].result.rationale | Should -Match 'without an Enabled value'
+            $result.findings[0].result.rationale | Should -Not -Match 'installed but disabled'
+            $result.findings[0].result.sufficiency | Should -Be 'SoftFail'
+        }
+
+        It 'HYB-01 reads an intra-organization connector that carries no TargetSharingEpr' {
+            Mock -ModuleName $script:ModuleName Get-HybridConfiguration { [pscustomobject]@{ Name = 'Hybrid Configuration'; Domains = @('contoso.com') } }
+            Mock -ModuleName $script:ModuleName Get-IntraOrganizationConnector {
+                [pscustomobject]@{ Name = 'HybridIOC - test'; Enabled = $true; TargetAddressDomains = @('contoso.mail.onmicrosoft.com'); DiscoveryEndpoint = 'https://autodiscover-s.outlook.com/autodiscover/autodiscover.svc' }
+            }
+            Mock -ModuleName $script:ModuleName Get-AuthServer { [pscustomobject]@{ Name = 'ACS - test'; Enabled = $true; Type = 'AzureADAuthServer'; IssuerIdentifier = 'test' } }
+            Mock -ModuleName $script:ModuleName Get-PartnerApplication { [pscustomobject]@{ Name = 'Exchange Online'; Enabled = $true; ApplicationIdentifier = 'test' } }
+            Mock -ModuleName $script:ModuleName Get-OrganizationRelationship {
+                [pscustomobject]@{ Name = 'On-premises to O365 - test'; Enabled = $true; DomainNames = @('contoso.mail.onmicrosoft.com'); FreeBusyAccessEnabled = $true; FreeBusyAccessLevel = 'LimitedDetails' }
+            }
+
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_HYB_01_HybridConfig' -Run (New-TestRun)
+            $connectors = Get-TestSectionRows -Result $result -Key 'hybrid.intra-org-connectors'
+            $connectors.Count | Should -Be 1
+            $connectors[0].TargetSharingEpr | Should -Be ''
+            $result.findings[0].result.outcome | Should -Be 'Compliant'
+        }
+
+        It 'HYB-01 reports a connector whose Enabled was not returned as unknown, not as disabled' {
+            Mock -ModuleName $script:ModuleName Get-HybridConfiguration { [pscustomobject]@{ Name = 'Hybrid Configuration' } }
+            Mock -ModuleName $script:ModuleName Get-IntraOrganizationConnector { [pscustomobject]@{ Name = 'HybridIOC - test' } }
+            Mock -ModuleName $script:ModuleName Get-AuthServer { [pscustomobject]@{ Name = 'ACS - test'; Enabled = $true } }
+            Mock -ModuleName $script:ModuleName Get-PartnerApplication { [pscustomobject]@{ Name = 'Exchange Online'; Enabled = $true } }
+            Mock -ModuleName $script:ModuleName Get-OrganizationRelationship { [pscustomobject]@{ Name = 'Rel - test'; Enabled = $true; FreeBusyAccessEnabled = $true } }
+
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_HYB_01_HybridConfig' -Run (New-TestRun)
+            $result.findings[0].result.outcome | Should -Be 'Unknown'
+            $result.findings[0].result.rationale | Should -Match 'Enabled was not returned: HybridIOC - test'
+            $result.findings[0].result.rationale | Should -Not -Match 'no intra-organization connector is enabled'
+        }
+
+        It 'CAS-01 reads AllowSimplePassword from a mobile device mailbox policy' {
+            Mock -ModuleName $script:ModuleName Get-MobileDeviceMailboxPolicy {
+                [pscustomobject]@{ Name = 'Default'; IsDefault = $true; PasswordEnabled = $true; MinPasswordLength = 6; AllowSimplePassword = $false; RequireDeviceEncryption = $true; MaxInactivityTimeLock = '00:15:00'; AllowNonProvisionableDevices = $false }
+            }
+
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_CAS_01_ClientAccess' -Run (New-TestRun)
+            $policies = Get-TestSectionRows -Result $result -Key 'client.mobile-device-policies'
+            $policies.Count | Should -Be 1
+            $policies[0].AllowSimplePassword | Should -Be $false
+            $policies[0].PSObject.Properties.Name | Should -Not -Contain 'AllowSimpleDevicePassword'
+        }
+
+        It 'CAS-01 does not report that no authentication policy exists when the policies could not be read' {
+            Mock -ModuleName $script:ModuleName Get-AuthenticationPolicy {
+                throw 'Some of the parameters specified with the "Get-AuthenticationPolicy" cmdlet aren''t present in the role definition for the current user. (test)'
+            }
+            Mock -ModuleName $script:ModuleName Get-OrganizationConfig { [pscustomobject]@{ DefaultAuthenticationPolicy = '' } }
+
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_CAS_01_ClientAccess' -Run (New-TestRun)
+            $rationale = $result.findings[0].result.rationale
+            $rationale | Should -Match 'Authentication policies could not be read'
+            $rationale | Should -Not -Match 'No authentication policy exists'
+            $rationale | Should -Not -Match 'No authentication policy is set as the organisation default'
+            $result.findings[0].result.outcome | Should -Be 'Unknown'
+        }
+
+        It 'PTCH-01 reads mitigations from Get-ExchangeServer and never calls Get-Mitigations' {
+            Mock -ModuleName $script:ModuleName Get-ExchangeServer {
+                [pscustomobject]@{ Name = 'EX01'; MitigationsEnabled = $true; MitigationsApplied = @('PING1', 'M2'); MitigationsBlocked = @('M1') }
+                [pscustomobject]@{ Name = 'EX02' }
+            }
+            Mock -ModuleName $script:ModuleName Get-HotFix { [pscustomobject]@{ HotFixID = 'KB0000001'; Description = 'Security Update'; InstalledOn = (Get-Date).AddDays(-3); InstalledBy = 'SYSTEM' } }
+            Mock -ModuleName $script:ModuleName Get-Mitigations { throw 'Get-Mitigations must not be called (test)' }
+
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_PTCH_01_SecurityUpdates' -Run (New-TestRun)
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Get-Mitigations -Times 0 -Exactly
+
+            $mitigations = Get-TestSectionRows -Result $result -Key 'security.mitigations'
+            $mitigations.Count | Should -Be 3
+            @($mitigations | Where-Object { $_.State -eq 'Applied' }).Count | Should -Be 2
+            @($mitigations | Where-Object { $_.State -eq 'Blocked' -and $_.Identifier -eq 'M1' }).Count | Should -Be 1
+
+            # EX02 did not return the setting: it is named, and never counted as enabled.
+            $result.findings[0].result.rationale | Should -Match 'not returned for 1 servers.*EX02'
+            $result.findings[0].result.rationale | Should -Not -Match 'enabled on all'
+        }
+    }
+
     Context 'Static analysis' {
 
         It 'reports no PSScriptAnalyzer findings for the repository' {

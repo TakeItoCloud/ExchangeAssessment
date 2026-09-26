@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — 2026-09-26 (phase P3.1, defects exposed by the first live run)
+
+The first run against a real Exchange organisation (P3) completed and wrote every output, with 140
+rows in `run.errors.csv`. Grouped by cause, the tool defects among them are fixed here. Every fix
+has a regression test that reproduces the measured object shape with fictional values; each test
+was shown red with the old code put back, and the file restored byte-for-byte by SHA-256.
+
+- **Four collectors no longer abort on a property the real object does not carry.** Under strict
+  mode one missing property threw and took the whole control with it: `DAG-01` (`Databases` - a
+  DAG has none; `DatabaseCount` is now counted from `Get-MailboxDatabase` by
+  `MasterServerOrAvailabilityGroup`, `$null` when that read fails), `AA.SPAM-01` (transport agents
+  return their name as `Identity`, not `Name`), `HYB-01` (`TargetSharingEpr`) and `CAS-01`. Every
+  Exchange property read in these four now goes through `Get-ExchObjectValue`; the fields a
+  verdict depends on are listed per row in a new `UnreadableFields` column and make that verdict
+  `Unknown` instead of being read as `$false` or empty.
+- **`CAS-01` reads `AllowSimplePassword`**, the property mobile device mailbox policies carry
+  (Learn, `Set-MobileDeviceMailboxPolicy`, read 2026-09-26). `AllowSimpleDevicePassword` is the
+  older ActiveSync policy name. The `client.mobile-device-policies` column is renamed to match.
+- **Identities are passed as strings.** The Exchange Management Shell is a remote session, and a
+  deserialized `ADObjectId` passed back as `-Identity` or `-Database` is refused.
+  `MB.DB-01` now calls `Get-MailboxDatabaseCopyStatus` with the database name (Learn: a database
+  returns all of its copies), `REPL-01` calls `Test-MAPIConnectivity` with the database name,
+  `MB.INV-01` calls `Get-MailboxStatistics` with the mailbox's distinguished name (GUID as
+  fallback), and `TR.CO-01` calls `Get-ADPermission` with the receive connector's distinguished
+  name instead of its `SERVER\Connector` identity string.
+- **Sizes are read from either form.** New private `ConvertTo-ExchByteCount` uses `ToBytes()` when
+  the value has it and otherwise parses the byte count in parentheses, with any digit grouping; it
+  returns `$null`, never 0, when there is none. `MB.DB-01` database size, `MB.INV-01` mailbox size
+  and the `MB.INV-01` quota parser use it.
+- **`PTCH-01` no longer calls `Get-Mitigations`**, which is a script in the Exchange `Scripts`
+  folder, not a cmdlet. Applied and blocked mitigations are read from `Get-ExchangeServer`'s
+  `MitigationsApplied` and `MitigationsBlocked` (Learn, Exchange Emergency Mitigation service,
+  read 2026-09-26); the settings section gains a `MitigationsBlocked` column. A server that does
+  not return `MitigationsEnabled` is now named as not confirmed, where before a partial set was
+  silent and the pass text could say the service was enabled on every server.
+- **Cmdlet warnings reach the report.** New private `Invoke-ExchWithWarningCapture` merges the
+  warning stream, returns the command's output unchanged, and records each warning in the run log
+  and `run.errors` with severity `Warning`. `Invoke-ExchQuery` uses it for every query and takes
+  an optional `-Warnings` list. `MB.DB-01` and `DAG-01` read `-Status` through it and report a
+  verdict read under warnings as `Unknown`.
+- **`MB.DB-01` no longer reports unread values as measured.** `Mounted` is three-state: a database
+  whose Information Store did not answer is reported as not measured (new `StatusRead` column) and
+  is excluded from the mounted, backup and size judgements, where `[bool]$null` called it
+  dismounted and its empty `LastFullBackup` called it unbacked. An unreadable copy or replay queue
+  length is `$null`, not 0, and an unreadable copy is `Unknown`.
+- **`CAS-01` no longer reports "no authentication policy exists" when the policies could not be
+  read.** A failed `Get-AuthenticationPolicy` or `Get-MobileDeviceMailboxPolicy`, or an unread
+  `DefaultAuthenticationPolicy`, is now `Unknown` with the reason. On the first live run the
+  account was refused `Get-AuthenticationPolicy` by RBAC.
+- `REPL-01` tests MAPI connectivity on a database whose `Mounted` state was not returned, skipping
+  only one measured as dismounted.
+
+**Not changed, and recorded as plan rows:** `Test-ExchPolicyBlocksBasicAuth` still treats an absent
+protocol property as blocked (P3.3); collectors other than the four that crashed still read
+properties directly (P3.4); `SRV-01`, `CERT-01`, `EX.VDIR-01` and `TR.QUE-01` record warnings but
+do not yet judge on them (P3.5). Green over mocks proves the mocks: the re-run is P3.2, owned by
+the operator.
+
+**Changed.** `ModuleVersion` is **0.7.0**: outcomes and rationales change for nine controls, which
+the PORT-PLAN rule treats as a minor bump.
+
 ### Added — 2026-09-11 (phases P14.5 and P14.6, `DEP.VOL-01` and `DEP-01`)
 
 The last two greenfield deployment controls, which complete the `DEP.*` set: the database and log

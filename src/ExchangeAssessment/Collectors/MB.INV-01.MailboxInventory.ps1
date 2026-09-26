@@ -54,10 +54,28 @@ function Invoke-ExchCollector_MB_INV_01_MailboxInventory {
     foreach ($mailbox in $mailboxes) {
         $sizeGb = $null
         $items = $null
+        # The mailbox is passed as a string. Over the Exchange Management Shell's remote session
+        # $mailbox.Identity arrives as a deserialized ADObjectId that -Identity cannot bind -
+        # measured on the first live run, where every logged mailbox failed that way (the
+        # collector logs its first five). The distinguished name is unique in the forest; the
+        # GUID is the fallback.
+        $statisticsIdentity = [string](Get-ExchObjectValue -InputObject $mailbox -Name 'DistinguishedName' -Default '')
+        if (-not $statisticsIdentity) { $statisticsIdentity = [string](Get-ExchObjectValue -InputObject $mailbox -Name 'Guid' -Default '') }
         try {
-            $statistics = Get-MailboxStatistics -Identity $mailbox.Identity -ErrorAction Stop
-            if ($statistics.TotalItemSize) { $sizeGb = [math]::Round($statistics.TotalItemSize.Value.ToBytes() / 1GB, 3) }
-            $items = [int]$statistics.ItemCount
+            if (-not $statisticsIdentity) { throw 'The mailbox was returned without a DistinguishedName or Guid to request its statistics by.' }
+            $statistics = Get-MailboxStatistics -Identity $statisticsIdentity -ErrorAction Stop
+
+            # TotalItemSize is Unlimited<ByteQuantifiedSize> locally and its text form remotely;
+            # ConvertTo-ExchByteCount reads either, and $null stays "not measured".
+            $totalItemSize = Get-ExchObjectValue -InputObject $statistics -Name 'TotalItemSize'
+            if ($null -ne $totalItemSize) {
+                $inner = Get-ExchObjectValue -InputObject $totalItemSize -Name 'Value'
+                $bytes = ConvertTo-ExchByteCount -Value $(if ($null -ne $inner) { $inner } else { $totalItemSize })
+                if ($null -ne $bytes) { $sizeGb = [math]::Round($bytes / 1GB, 3) }
+            }
+            $itemCount = Get-ExchObjectValue -InputObject $statistics -Name 'ItemCount'
+            if ($null -ne $itemCount) { $items = [int64]$itemCount }
+            if ($null -eq $sizeGb) { throw 'Get-MailboxStatistics returned no readable TotalItemSize.' }
         }
         catch {
             $statisticsFailures++
@@ -211,10 +229,10 @@ function Convert-ExchQuotaToGb {
     $text = [string]$Quota
     if (-not $text -or $text -match 'Unlimited') { return $null }
 
-    if ($text -match '\(([\d,]+)\s*bytes\)') {
-        $bytes = [double](($matches[1]) -replace ',', '')
-        return [math]::Round($bytes / 1GB, 3)
-    }
+    # The byte count in parentheses is read by the shared parser, which accepts any digit
+    # grouping ('53,687,091,200' or '53.687.091.200') rather than commas only.
+    $bytes = ConvertTo-ExchByteCount -Value $text
+    if ($null -ne $bytes) { return [math]::Round($bytes / 1GB, 3) }
     if ($text -match '^\s*([\d\.]+)\s*(KB|MB|GB|TB)\s*$') {
         $value = [double]$matches[1]
         switch ($matches[2]) {

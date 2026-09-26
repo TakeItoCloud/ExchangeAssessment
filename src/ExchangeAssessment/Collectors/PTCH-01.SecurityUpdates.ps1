@@ -77,34 +77,40 @@ function Invoke-ExchCollector_PTCH_01_SecurityUpdates {
         }) | Out-Null
     }
 
-    $mitigations = @(Invoke-ExchQuery -Label 'Get-Mitigations' -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-Mitigations -ErrorAction Stop })
-    $mitigationRows = foreach ($m in $mitigations) {
-        [pscustomobject]@{
-            Server     = [string]$m.Server
-            Identifier = [string]$m.Identifier
-            Applied    = (ConvertTo-ExchFlatValue -Value $m.Applied)
-            State      = [string]$m.State
-        }
-    }
+    # Applied and blocked mitigations are read from Get-ExchangeServer, which exposes them as
+    # MitigationsApplied and MitigationsBlocked. Get-Mitigations is not a cmdlet: it is the
+    # Get-Mitigations.ps1 script in the Exchange Scripts folder, and calling it as a command
+    # failed on the first live run with CommandNotFoundException.
+    # Source: https://learn.microsoft.com/exchange/plan-and-deploy/post-installation-tasks/security-best-practices/exchange-emergency-mitigation-service
+    # ("View applied and blocked mitigations", "Get-Mitigations script") - read 2026-09-26.
+    $mitigationRows = New-Object System.Collections.Generic.List[object]
+    $eemsRows = New-Object System.Collections.Generic.List[object]
+    foreach ($srv in $servers) {
+        $serverName = [string](Get-ExchObjectValue -InputObject $srv -Name 'Name' -Default '')
+        $applied = @(Get-ExchObjectValue -InputObject $srv -Name 'MitigationsApplied' | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        $blocked = @(Get-ExchObjectValue -InputObject $srv -Name 'MitigationsBlocked' | Where-Object { $_ } | ForEach-Object { [string]$_ })
 
-    # EEMS on/off is a per-server Exchange setting.
-    $eemsRows = foreach ($srv in $servers) {
-        $enabled = $null
-        $p = $srv.PSObject.Properties.Match('MitigationsEnabled') | Select-Object -First 1
-        if ($p -and $null -ne $p.Value) { $enabled = [bool]$p.Value }
-        [pscustomobject]@{
-            Server             = [string]$srv.Name
-            MitigationsEnabled = $enabled
-            MitigationsApplied = (ConvertTo-ExchFlatValue -Value $(
-                $a = $srv.PSObject.Properties.Match('MitigationsApplied') | Select-Object -First 1
-                if ($a) { $a.Value } else { $null }))
+        foreach ($id in $applied) {
+            $mitigationRows.Add([pscustomobject]@{ Server = $serverName; Identifier = $id; Applied = $true;  State = 'Applied' }) | Out-Null
         }
+        foreach ($id in $blocked) {
+            $mitigationRows.Add([pscustomobject]@{ Server = $serverName; Identifier = $id; Applied = $false; State = 'Blocked' }) | Out-Null
+        }
+
+        # EEMS on/off is a per-server Exchange setting. $null means the property was not
+        # returned, which the verdict below reports as not confirmed rather than off.
+        $eemsRows.Add([pscustomobject]@{
+            Server             = $serverName
+            MitigationsEnabled = (Get-ExchObjectBool -InputObject $srv -Name 'MitigationsEnabled')
+            MitigationsApplied = (ConvertTo-ExchFlatValue -Value $applied)
+            MitigationsBlocked = (ConvertTo-ExchFlatValue -Value $blocked)
+        }) | Out-Null
     }
 
     $serverArr     = @($serverRows.ToArray())
     $hotfixArr     = @($hotfixRows.ToArray())
-    $mitigationArr = @($mitigationRows)
-    $eemsArr       = @($eemsRows)
+    $mitigationArr = @($mitigationRows.ToArray())
+    $eemsArr       = @($eemsRows.ToArray())
 
     # Build currency is EX.CH-01's answer; repeating the logic here would let the two drift.
     $buildFinding = $null
@@ -132,7 +138,7 @@ function Invoke-ExchCollector_PTCH_01_SecurityUpdates {
             -Columns @('Server', 'Identifier', 'Applied', 'State') -Rows $mitigationArr
 
         New-ExchInventorySection -Run $Run -Key 'security.mitigation-settings' -Title 'Emergency Mitigation Service Settings' -Area 'Security' `
-            -Columns @('Server', 'MitigationsEnabled', 'MitigationsApplied') -Rows $eemsArr
+            -Columns @('Server', 'MitigationsEnabled', 'MitigationsApplied', 'MitigationsBlocked') -Rows $eemsArr
     )
 
     $problems = New-Object System.Collections.Generic.List[string]
@@ -171,6 +177,13 @@ function Invoke-ExchCollector_PTCH_01_SecurityUpdates {
         }
         elseif ($eemsUnknown.Count -eq $eemsArr.Count -and $eemsArr.Count -gt 0) {
             $problems.Add('The Emergency Mitigation Service state is not exposed by this Exchange version, so it could not be confirmed') | Out-Null
+            $outcomes.Add('Unknown') | Out-Null
+        }
+        elseif ($eemsUnknown.Count -gt 0) {
+            # Some servers did not return the setting. Staying silent would let the rationale
+            # say the service is enabled on every server.
+            $problems.Add(("The Emergency Mitigation Service state was not returned for {0} servers, so it could not be confirmed on them: {1}" -f `
+                $eemsUnknown.Count, (($eemsUnknown | ForEach-Object { $_.Server }) -join ', '))) | Out-Null
             $outcomes.Add('Unknown') | Out-Null
         }
     }
