@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — 2026-09-26 (phase P3.1 follow-up, `EX.VDIR-01` per server and streamed query output)
+
+Two defects that 0.7.0 did not fix, found after its merge while answering why the first live run
+assessed no virtual directory on the server it ran on.
+
+- **`EX.VDIR-01` reads virtual directories and Outlook Anywhere per server.** Read once for the
+  whole organisation, each `Get-*VirtualDirectory` failed as a whole when one server's IIS did not
+  answer; on the first live run one unreachable member failed all nine reads, and the server the
+  assessment ran on was lost with them. Each Mailbox or ClientAccess server from
+  `Get-ExchangeServer` is now read on its own (Edge Transport servers are skipped), a new
+  `exchange.virtual-directory-reads` section records every read per server and type, and the
+  rationale names the servers that could not be read. With no server list the organisation-wide
+  read is kept as the fallback. The Autodiscover SCP rows use guarded reads.
+- **Query output is streamed, not buffered - a regression in 0.7.0.** 0.7.0's
+  `Invoke-ExchWithWarningCapture` collected a query's output before returning it, so a query that
+  returned some objects and then failed lost them all; the plain `& $Script` it replaced kept them.
+  It now passes objects through as they arrive. Every collector that reads through
+  `Invoke-ExchQuery` was affected in 0.7.0.
+- README **Permissions** now states why `MB.AV-01` and `TLS-01` need a local administrator and an
+  elevated shell, from Learn's
+  [about_Remote_Requirements](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_remote_requirements)
+  (read 2026-09-26): the default remoting endpoint admits only Administrators, and a connection to
+  the local computer needs Run as administrator.
+- New plan row **P3.6**: `MB.AV-01` cannot tell hidden Defender exclusions
+  (`HideExclusionsFromLocalAdmins`) from absent ones.
+
+Two regression tests cover the changes, guarding five mutations. Together with the 21 from 0.7.0,
+all 26 were shown red with the old code restored, each file put back byte-identical by SHA-256.
+
+**Changed.** `ModuleVersion` is **0.8.0**: `EX.VDIR-01`'s outcome, rationale and sections change.
+
 ### Fixed — 2026-09-26 (phase P3.1, defects exposed by the first live run)
 
 The first run against a real Exchange organisation (P3) completed and wrote every output, with 140

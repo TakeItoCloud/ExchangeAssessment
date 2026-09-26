@@ -325,8 +325,9 @@ function Invoke-ExchWithWarningCapture {
     warnings of the kinds Get-MailboxDatabase -Status and Get-DatabaseAvailabilityGroup -Status
     write reached the console and none reached the run's report.
 
-    The warning stream is merged into output (3>&1) and split back out by type, so the caller
-    receives exactly what the command returned. A terminating error still propagates. Each
+    The warning stream is merged into output (3>&1) and split back out by type as it streams, so
+    the caller receives exactly what the command returned, including what it returned before a
+    failure. A terminating error still propagates. Each
     warning goes to the run log and the run's error list with severity Warning, is echoed once
     to the console prefixed with the query that raised it, and is added to -Warnings when given.
 
@@ -342,10 +343,13 @@ function Invoke-ExchWithWarningCapture {
         [Parameter()][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Warnings
     )
 
-    $exchCaptureOutput = New-Object System.Collections.Generic.List[object]
-    foreach ($exchCaptureItem in @(& $Script 3>&1)) {
-        if ($exchCaptureItem -is [System.Management.Automation.WarningRecord]) {
-            $exchCaptureMessage = [string]$exchCaptureItem.Message
+    # Output is passed through as it arrives, not buffered. A query that returns some objects and
+    # then fails keeps what it returned - the caller still sees the failure, and Invoke-ExchQuery
+    # still records it - which is how the plain `& $Script` it replaced behaved. Buffering would
+    # discard one server's results because another server did not answer.
+    & $Script 3>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.WarningRecord]) {
+            $exchCaptureMessage = [string]$_.Message
             if ($null -ne $Warnings) { $Warnings.Add(("{0}: {1}" -f $Label, $exchCaptureMessage)) | Out-Null }
             if ($Run) {
                 $exchCaptureRecord = New-Object System.Management.Automation.ErrorRecord(
@@ -360,10 +364,9 @@ function Invoke-ExchWithWarningCapture {
                 catch { Write-Warning ("Could not record a warning from {0}: {1}" -f $Label, $_.Exception.Message) }
             }
             Write-Warning ("{0}: {1}" -f $Label, $exchCaptureMessage)
-            continue
         }
-        $exchCaptureOutput.Add($exchCaptureItem) | Out-Null
+        else {
+            $_
+        }
     }
-
-    return $exchCaptureOutput.ToArray()
 }

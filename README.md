@@ -118,6 +118,25 @@ View-Only Organization Management in Exchange plus domain read covers most colle
 event log and anti-malware exclusion collectors need local administrative rights on the
 Exchange servers.
 
+**Run the Exchange Management Shell with Run as administrator.** `MB.AV-01` (anti-malware
+exclusions) and `TLS-01` (SCHANNEL and .NET registry) read every Exchange server with
+`Invoke-Command -ComputerName <server>` - including the server the assessment runs on. Two
+requirements follow, both stated in Microsoft Learn's
+[about_Remote_Requirements](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_remote_requirements)
+(read 2026-09-26):
+
+- the default remoting endpoint admits only members of the **Administrators** group on the target
+  server (or accounts granted access to the endpoint, such as **Remote Management Users**), so the
+  account must be a local administrator of each Exchange server - a domain account in that group
+  is not subject to remote UAC filtering;
+- a connection to the local computer ("loopback") needs PowerShell started with **Run as
+  administrator**, even for a member of Administrators. Without it, the read of the local server
+  fails with `Access is denied`, as it did on the first live run.
+
+Microsoft's own guidance for listing Defender exclusions on an Exchange server also runs
+`Get-MpPreference` in an elevated session. If the `HideExclusionsFromLocalAdmins` policy is set,
+exclusions are not visible even to administrators; see PORT-PLAN P3.6.
+
 Seven controls need a little more, and say so in their output rather than failing:
 
 - **`TR.CO-01`** runs `Get-ADPermission` against each receive connector to find out whether an
