@@ -54,6 +54,18 @@ function Invoke-ExchCollector_CERT_01_Certificates {
                 $issuer  = [string]$cert.Issuer
                 $selfSigned = ($subject -and $issuer -and $subject -eq $issuer)
 
+                # IISServices names the IIS sites the certificate is bound to. The Services flag
+                # 'IIS' alone cannot say which site: setup binds its self-signed "Microsoft
+                # Exchange" certificate to W3SVC/1 (Default Web Site, which clients reach) and
+                # W3SVC/2 (Exchange Back End, which only the front end reaches), and the back-end
+                # binding must stay. Source: https://learn.microsoft.com/exchange/architecture/client-access/certificates
+                # ("Properties of the default self-signed certificates"), read 2026-09-26.
+                # $null means the property was not returned, so the binding is not known.
+                $iisSites = $null
+                if (Test-ExchObjectProperty -InputObject $cert -Name 'IISServices') {
+                    $iisSites = ConvertTo-ExchFlatValue -Value @(Get-ExchObjectValue -InputObject $cert -Name 'IISServices')
+                }
+
                 $rows.Add([pscustomobject]@{
                     Server        = $(if ($server) { $server } else { 'current session' })
                     Thumbprint    = [string]$cert.Thumbprint
@@ -69,6 +81,8 @@ function Invoke-ExchCollector_CERT_01_Certificates {
                     PublicKeySize = $keySize
                     SignatureAlgorithm = (Get-ExchCertificateSignatureAlgorithm -Certificate $cert)
                     SelfSigned    = $selfSigned
+                    IISSites      = $iisSites
+                    ClientFacingIis = $(if ($null -eq $iisSites) { $null } else { [bool]($iisSites -match 'W3SVC/1(?!\d)') })
                 }) | Out-Null
             }
         }
@@ -86,7 +100,7 @@ function Invoke-ExchCollector_CERT_01_Certificates {
 
     $sections = @(
         New-ExchInventorySection -Run $Run -Key 'certificate.certificates' -Title 'Exchange Certificates' -Area 'Certificate' `
-            -Columns @('Server', 'Thumbprint', 'Subject', 'Issuer', 'FriendlyName', 'Services', 'Domains', 'NotBefore', 'NotAfter', 'DaysToExpiry', 'Status', 'PublicKeySize', 'SignatureAlgorithm', 'SelfSigned') `
+            -Columns @('Server', 'Thumbprint', 'Subject', 'Issuer', 'FriendlyName', 'Services', 'Domains', 'NotBefore', 'NotAfter', 'DaysToExpiry', 'Status', 'PublicKeySize', 'SignatureAlgorithm', 'SelfSigned', 'IISSites', 'ClientFacingIis') `
             -Rows $certArr
     )
 
@@ -107,7 +121,11 @@ function Invoke-ExchCollector_CERT_01_Certificates {
     $expiringSoon= @($certArr | Where-Object { $null -ne $_.DaysToExpiry -and $_.DaysToExpiry -gt $criticalDays -and $_.DaysToExpiry -le $warningDays })
     $weakKey     = @($certArr | Where-Object { $null -ne $_.PublicKeySize -and $_.PublicKeySize -lt $minKeySize })
     $weakAlgo    = @($certArr | Where-Object { $_.SignatureAlgorithm -and ($weakAlgorithms -contains $_.SignatureAlgorithm) })
-    $selfSignedBound = @($certArr | Where-Object { $flagSelfSigned -and $_.SelfSigned -and $_.Services -and $_.Services -match 'IIS' })
+    # A self-signed certificate is judged only on the site clients reach. One enabled for IIS
+    # whose site bindings were not returned is reported as not determinable, not as a finding.
+    $selfSignedIis   = @($certArr | Where-Object { $flagSelfSigned -and $_.SelfSigned -and $_.Services -and $_.Services -match 'IIS' })
+    $selfSignedBound = @($selfSignedIis | Where-Object { $_.ClientFacingIis -eq $true })
+    $selfSignedUnread = @($selfSignedIis | Where-Object { $null -eq $_.ClientFacingIis })
 
     $unbound = @()
     foreach ($service in $requiredServices) {
@@ -138,9 +156,14 @@ function Invoke-ExchCollector_CERT_01_Certificates {
         $outcomes.Add('NonCompliant') | Out-Null
     }
     if ($selfSignedBound.Count -gt 0) {
-        $problems.Add(("{0} self-signed certificates are bound to IIS, which external clients will not trust: {1}" -f $selfSignedBound.Count, `
+        $problems.Add(("{0} self-signed certificates are bound to the Default Web Site (W3SVC/1), which clients reach and will not trust: {1}" -f $selfSignedBound.Count, `
             (($selfSignedBound | ForEach-Object { "$($_.Subject) on $($_.Server)" }) -join ', '))) | Out-Null
         $outcomes.Add('PartiallyCompliant') | Out-Null
+    }
+    if ($selfSignedUnread.Count -gt 0) {
+        $problems.Add(("{0} self-signed certificates are enabled for IIS but their site bindings (IISServices) were not returned, so whether clients are served them is unknown: {1}" -f $selfSignedUnread.Count, `
+            (($selfSignedUnread | ForEach-Object { "$($_.Subject) on $($_.Server)" }) -join ', '))) | Out-Null
+        $outcomes.Add('Unknown') | Out-Null
     }
     if ($expiringSoon.Count -gt 0) {
         $problems.Add(("{0} certificates expire within {1} days and should be scheduled for renewal" -f $expiringSoon.Count, $warningDays)) | Out-Null
@@ -164,7 +187,7 @@ function Invoke-ExchCollector_CERT_01_Certificates {
                  else { ("All {0} certificates are valid for more than {1} days, meet the {2}-bit key minimum, and every required service has a certificate bound." -f $certArr.Count, $warningDays, $minKeySize) }
 
     $finding = New-ExchControlFinding -Control $control -Severity $severity -Outcome $outcome `
-        -Sufficiency $(if ($readErrors.Count -gt 0) { 'SoftFail' } else { 'Pass' }) `
+        -Sufficiency $(if ($readErrors.Count -gt 0 -or $selfSignedUnread.Count -gt 0) { 'SoftFail' } else { 'Pass' }) `
         -Rationale $rationale `
         -Evidence @($evidence) `
         -Remediation 'Renew expiring certificates from a trusted CA, bind a valid certificate to every required service, and replace certificates below the key size or using a deprecated signature algorithm.' `
@@ -175,6 +198,7 @@ function Invoke-ExchCollector_CERT_01_Certificates {
             weakKey          = $weakKey.Count
             weakAlgorithm    = $weakAlgo.Count
             selfSignedOnIis  = $selfSignedBound.Count
+            selfSignedIisSiteUnknown = $selfSignedUnread.Count
             servicesWithoutCertificate = $unbound
         } `
         -Meta @{ dataSources = @{ Exchange = @{ state = $(if ($readErrors.Count -gt 0) { 'Partial' } else { 'Success' }); reason = ($readErrors -join '; ') } }; evaluationStatus = 'Complete' }

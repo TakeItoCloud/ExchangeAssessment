@@ -3000,6 +3000,9 @@ Describe 'ExchangeAssessment' {
                 'Get-PowerShellVirtualDirectory'      = 'param($Server)'
                 'Get-OutlookAnywhere'                 = 'param($Server)'
                 'Get-ClientAccessService'             = 'param()'
+                'Get-SendConnector'                   = 'param()'
+                'Get-ReceiveConnector'                = 'param()'
+                'Get-ExchangeCertificate'             = 'param($Server)'
             }
             foreach ($name in $stubs.Keys) {
                 if (Get-Command -Name $name -ErrorAction SilentlyContinue) { continue }
@@ -3165,6 +3168,253 @@ Describe 'ExchangeAssessment' {
             $finding.result.outcome | Should -Be 'Unknown'
             $finding.result.rationale | Should -Match 'could not be read on 1 servers.*EX02'
             $finding.result.metrics.serversRead | Should -Be 1
+        }
+
+        It 'captures a warning that reaches -WarningVariable but not the warning stream, as the Exchange Management Shell does' {
+            # Measured on the second live run: `3>&1` caught none of the warnings Exchange's
+            # remote-session commands printed, while -WarningVariable on the cmdlet did. A command
+            # that silences its own warning stream reproduces that shape: stream 0, variable 1.
+            Mock -ModuleName $script:ModuleName Get-DatabaseAvailabilityGroup {
+                Write-Warning 'Unable to get Primary Active Manager information (test).' 3>$null
+                [pscustomobject]@{ Name = 'DAG01' }
+            }
+            $run = New-TestRun
+            $warnings = New-Object System.Collections.Generic.List[string]
+            $out = & (Get-Module $script:ModuleName) {
+                param($r, $w)
+                Invoke-ExchWithWarningCapture -Label 'Get-DatabaseAvailabilityGroup -Status' -Run $r -ControlId 'DAG-01' -Warnings $w -Script { Get-DatabaseAvailabilityGroup -Status -ErrorAction Stop } 3>$null
+            } $run $warnings
+
+            @($out).Count | Should -Be 1
+            $warnings.Count | Should -Be 1
+            $warnings[0] | Should -Match 'Primary Active Manager'
+            $run.Errors.Count | Should -Be 1
+            $run.Errors[0].data.capturedByVariable | Should -BeGreaterOrEqual 1
+            $run.Errors[0].data.capturedByStream | Should -Be 0
+        }
+
+        It 'still catches, on the warning stream, a warning the -WarningVariable default cannot reach' {
+            # A plain (non-advanced) function outside the module takes no common parameters and
+            # does not see this module's defaults, so only the stream path can catch its warning.
+            # Without this case the two paths mask each other and neither is guarded.
+            $null = New-Item -Path 'function:global:Write-TestStreamOnlyWarning' -Value { Write-Warning 'stream-only warning (test)'; 'value' } -Force
+            try {
+                $run = New-TestRun
+                $out = & (Get-Module $script:ModuleName) {
+                    param($r)
+                    Invoke-ExchWithWarningCapture -Label 'Stream only' -Run $r -Script { Write-TestStreamOnlyWarning } 3>$null
+                } $run
+                @($out) | Should -Be @('value')
+                $run.Errors.Count | Should -Be 1
+                $run.Errors[0].data.capturedByStream | Should -Be 1
+                $run.Errors[0].data.capturedByVariable | Should -Be 0
+            }
+            finally { Remove-Item -Path 'function:global:Write-TestStreamOnlyWarning' -ErrorAction SilentlyContinue }
+        }
+
+        It 'records a warning seen by both capture paths once, with its count' {
+            $run = New-TestRun
+            $null = & (Get-Module $script:ModuleName) {
+                param($r)
+                Invoke-ExchWithWarningCapture -Label 'Get-Thing' -Run $r -Script {
+                    Get-MailboxDatabase -Status -ErrorAction Stop
+                } 3>$null
+            } $run
+            # Get-MailboxDatabase is not mocked in this It, so the stub returns nothing; the
+            # function-level warning below is what is being counted.
+            $run.Errors.Count | Should -Be 0
+
+            Mock -ModuleName $script:ModuleName Get-MailboxDatabase { Write-Warning 'store unreachable (test)'; Write-Warning 'store unreachable (test)' }
+            $run = New-TestRun
+            $null = & (Get-Module $script:ModuleName) {
+                param($r)
+                Invoke-ExchWithWarningCapture -Label 'Get-MailboxDatabase -Status' -Run $r -Script { Get-MailboxDatabase -Status -ErrorAction Stop } 3>$null
+            } $run
+            $run.Errors.Count | Should -Be 1 -Because 'one distinct message is one row'
+            $run.Errors[0].data.capturedByStream | Should -Be 2
+        }
+
+        It 'TR.CO-01 does not call a connector that offers Basic only after TLS unprotected' {
+            $mechanisms = { param($a) & (Get-Module $script:ModuleName) { param($x) Test-ExchAuthMechanismUnprotected -AuthMechanism $x -Discouraged @('BasicAuth') } $a }
+            (& $mechanisms 'Tls, Integrated, BasicAuth, BasicAuthRequireTLS, ExchangeServer') | Should -BeFalse
+            (& $mechanisms 'Tls, BasicAuth') | Should -BeTrue
+            (& $mechanisms 'Tls, Integrated') | Should -BeFalse
+            (& $mechanisms '') | Should -BeFalse
+
+            Mock -ModuleName $script:ModuleName Get-SendConnector { }
+            Mock -ModuleName $script:ModuleName Get-ReceiveConnector {
+                foreach ($c in @(
+                        @{ Name = 'Default Frontend EX01'; Auth = 'Tls, Integrated, BasicAuth, BasicAuthRequireTLS, ExchangeServer' },
+                        @{ Name = 'Legacy App EX01';       Auth = 'Tls, BasicAuth' })) {
+                    [pscustomobject]@{
+                        Identity = "EX01\$($c.Name)"; Name = $c.Name; Server = 'EX01'; Enabled = $true
+                        DistinguishedName = "CN=$($c.Name),CN=Protocols,CN=EX01,DC=example,DC=test"
+                        Bindings = @('0.0.0.0:25'); RemoteIPRanges = @('192.0.2.0/24'); PermissionGroups = 'ExchangeUsers'
+                        AuthMechanism = $c.Auth; Fqdn = 'ex01.example.test'; RequireTLS = $false; MaxMessageSize = '36 MB'; RequireEHLODomain = $false
+                    }
+                }
+            }
+            Mock -ModuleName $script:ModuleName Get-ADPermission { }
+
+            # The shipped threshold, passed explicitly: a test run carries no Thresholds.psd1.
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_TR_CO_01_TransportConnectors' -Run (New-TestRun -Config @{ Transport = @{ DiscouragedAuthMechanisms = @('BasicAuth') } })
+            $rationale = $result.findings[0].result.rationale
+            $rationale | Should -Match '1 receive connectors offer a discouraged authentication mechanism'
+            $rationale | Should -Match 'EX01\\Legacy App EX01'
+            $rationale | Should -Not -Match 'Default Frontend EX01'
+        }
+
+        It 'CERT-01 judges a self-signed certificate on the site clients reach, not on the back end' {
+            Mock -ModuleName $script:ModuleName Get-ExchangeServer { [pscustomobject]@{ Name = 'EX01' } }
+            function New-TestCert {
+                param([string]$Subject, [string]$Issuer, [string[]]$Sites, [switch]$NoSites)
+                $cert = [pscustomobject]@{
+                    Thumbprint = ([guid]::NewGuid().ToString('N')); Subject = $Subject; Issuer = $Issuer; FriendlyName = $Subject
+                    Services = 'IMAP, POP, IIS, SMTP'; CertificateDomains = @('ex01.example.test'); NotBefore = (Get-Date).AddYears(-1)
+                    NotAfter = (Get-Date).AddYears(2); Status = 'Valid'; PublicKeySize = 2048
+                }
+                if (-not $NoSites) { $cert | Add-Member -NotePropertyName IISServices -NotePropertyValue $Sites }
+                $cert
+            }
+
+            # Back end only: the default self-signed certificate after a CA certificate took the front end.
+            Mock -ModuleName $script:ModuleName Get-ExchangeCertificate {
+                New-TestCert -Subject 'CN=EX01' -Issuer 'CN=EX01' -Sites @('IIS://EX01/W3SVC/2')
+                New-TestCert -Subject 'CN=mail.contoso.com' -Issuer 'CN=Contoso Issuing CA' -Sites @('IIS://EX01/W3SVC/1')
+            }
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_CERT_01_Certificates' -Run (New-TestRun)
+            $result.findings[0].result.rationale | Should -Not -Match 'self-signed'
+
+            # Front end: clients are served the self-signed certificate.
+            Mock -ModuleName $script:ModuleName Get-ExchangeCertificate {
+                New-TestCert -Subject 'CN=EX01' -Issuer 'CN=EX01' -Sites @('IIS://EX01/W3SVC/1', 'IIS://EX01/W3SVC/2')
+            }
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_CERT_01_Certificates' -Run (New-TestRun)
+            $result.findings[0].result.rationale | Should -Match '1 self-signed certificates are bound to the Default Web Site \(W3SVC/1\)'
+
+            # Site bindings not returned: not determinable, never a finding.
+            Mock -ModuleName $script:ModuleName Get-ExchangeCertificate {
+                New-TestCert -Subject 'CN=EX01' -Issuer 'CN=EX01' -NoSites
+            }
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_CERT_01_Certificates' -Run (New-TestRun)
+            $result.findings[0].result.rationale | Should -Match 'site bindings \(IISServices\) were not returned'
+            $result.findings[0].result.rationale | Should -Not -Match 'bound to the Default Web Site'
+        }
+
+        It 'EX.VDIR-01 does not judge the PowerShell directory HTTP internal URL, and still judges its external URL' {
+            Mock -ModuleName $script:ModuleName Get-ExchangeServer { [pscustomobject]@{ Name = 'EX01'; ServerRole = 'Mailbox' } }
+            $script:VdirPowerShellExternal = ''
+            foreach ($name in @('Get-OwaVirtualDirectory', 'Get-EcpVirtualDirectory', 'Get-WebServicesVirtualDirectory', 'Get-OabVirtualDirectory',
+                                'Get-AutodiscoverVirtualDirectory', 'Get-MapiVirtualDirectory', 'Get-ActiveSyncVirtualDirectory')) {
+                Mock -ModuleName $script:ModuleName -CommandName $name -MockWith {
+                    [pscustomobject]@{ Name = 'vdir'; Server = $Server; InternalUrl = "https://$Server.example.test/x"; ExternalUrl = 'https://mail.contoso.com/x'; WindowsAuthentication = $true }
+                }
+            }
+            Mock -ModuleName $script:ModuleName Get-PowerShellVirtualDirectory {
+                [pscustomobject]@{ Name = 'PowerShell (Default Web Site)'; Server = $Server; InternalUrl = "http://$Server.example.test/powershell"; ExternalUrl = $script:VdirPowerShellExternal; WindowsAuthentication = $true }
+            }
+            Mock -ModuleName $script:ModuleName Get-OutlookAnywhere { }
+            Mock -ModuleName $script:ModuleName Get-ClientAccessService { [pscustomobject]@{ Name = 'EX01'; AutoDiscoverServiceInternalUri = 'https://autodiscover.contoso.com/Autodiscover/Autodiscover.xml' } }
+
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_EX_VDIR_01_VirtualDirectories' -Run (New-TestRun)
+            $result.findings[0].result.rationale | Should -Not -Match 'plain HTTP'
+
+            $script:VdirPowerShellExternal = 'http://mail.contoso.com/powershell'
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_EX_VDIR_01_VirtualDirectories' -Run (New-TestRun)
+            $result.findings[0].result.rationale | Should -Match '1 virtual directories publish a plain HTTP URL: EX01 powershell'
+        }
+
+        It 'HYB-01 does not say mail flow fails when no intra-organization connector exists' {
+            Mock -ModuleName $script:ModuleName Get-HybridConfiguration { [pscustomobject]@{ Name = 'Hybrid Configuration' } }
+            Mock -ModuleName $script:ModuleName Get-IntraOrganizationConnector { }
+            Mock -ModuleName $script:ModuleName Get-AuthServer { [pscustomobject]@{ Name = 'ACS - test'; Enabled = $true } }
+            Mock -ModuleName $script:ModuleName Get-PartnerApplication { [pscustomobject]@{ Name = 'Exchange Online'; Enabled = $true } }
+            Mock -ModuleName $script:ModuleName Get-OrganizationRelationship { [pscustomobject]@{ Name = 'Rel - test'; Enabled = $true; FreeBusyAccessEnabled = $true } }
+
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_HYB_01_HybridConfig' -Run (New-TestRun)
+            $result.findings[0].result.rationale | Should -Match 'no intra-organization connector exists'
+            $result.findings[0].result.rationale | Should -Not -Match 'mail flow'
+            $result.findings[0].result.outcome | Should -Be 'PartiallyCompliant'
+        }
+
+        It 'MB.AV-01 does not report gaps on a server where Defender returned no exclusions, a placeholder, or runs passive' {
+            Mock -ModuleName $script:ModuleName Get-ExchangeServer {
+                'EX01', 'EX02', 'EX03', 'EX04' | ForEach-Object { [pscustomobject]@{ Name = $_ } }
+            }
+            Mock -ModuleName $script:ModuleName Invoke-Command {
+                switch ($ComputerName) {
+                    'EX01' { [pscustomobject]@{ ExclusionPath = @($null); ExclusionProcess = @($null); RunningMode = 'Normal' } }
+                    'EX02' { [pscustomobject]@{ ExclusionPath = @('N/A: Must be an administrator to view exclusions'); ExclusionProcess = @('N/A: Must be an administrator to view exclusions'); RunningMode = 'Normal' } }
+                    'EX03' { [pscustomobject]@{ ExclusionPath = @('D:\Exchange\Mailbox'); ExclusionProcess = @('EdgeTransport.exe'); RunningMode = 'Passive Mode' } }
+                    'EX04' { [pscustomobject]@{ ExclusionPath = @('D:\Exchange\Mailbox'); ExclusionProcess = @(); RunningMode = 'Normal' } }
+                }
+            }
+            $config = @{ AntiVirus = @{ RequiredPathTokens = @('\Mailbox'); RequiredProcessTokens = @('EdgeTransport.exe') } }
+
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_MB_AV_01_AVExclusions' -Run (New-TestRun -Config $config)
+            $rows = Get-TestSectionRows -Result $result -Key 'security.av-exclusions'
+            $rows.Count | Should -Be 4
+            $byServer = @{}; foreach ($r in $rows) { $byServer[$r.Server] = $r }
+
+            $byServer['EX01'].Status | Should -Be 'Not assessed'
+            $byServer['EX01'].PathCount | Should -Be 0 -Because '@($null) is not an exclusion'
+            $byServer['EX01'].Reason | Should -Match 'returned no exclusions at all'
+            $byServer['EX02'].Status | Should -Be 'Not assessed'
+            $byServer['EX02'].Reason | Should -Match 'placeholder'
+            $byServer['EX03'].Status | Should -Be 'Not assessed'
+            $byServer['EX03'].Reason | Should -Match 'Passive Mode'
+            $byServer['EX04'].Status | Should -Be 'Assessed'
+            $byServer['EX04'].MissingProcessCount | Should -Be 1
+
+            $result.findings[0].result.rationale | Should -Match '1 of 1 assessed servers are missing recommended exclusions'
+        }
+
+        It 'MB.INV-01 stops requesting statistics on a database whose store keeps failing, and says so' {
+            $script:DeclaredInvMailboxes = @(
+                @{ Name = 'DB02 User 1'; Db = 'DB02' }, @{ Name = 'DB02 User 2'; Db = 'DB02' }, @{ Name = 'DB02 User 3'; Db = 'DB02' },
+                @{ Name = 'DB02 User 4'; Db = 'DB02' }, @{ Name = 'DB02 User 5'; Db = 'DB02' },
+                @{ Name = 'DB01 User 1'; Db = 'DB01' }, @{ Name = 'DB01 User 2'; Db = 'DB01' })
+            Mock -ModuleName $script:ModuleName Get-Mailbox {
+                foreach ($m in $script:DeclaredInvMailboxes) {
+                    [pscustomobject]@{
+                        Name = $m.Name; DistinguishedName = "CN=$($m.Name),OU=Users,DC=example,DC=test"; Guid = [guid]::NewGuid()
+                        PrimarySmtpAddress = ('{0}@contoso.com' -f ($m.Name -replace ' ', '.')); RecipientTypeDetails = 'UserMailbox'
+                        Database = $m.Db; ProhibitSendQuota = 'Unlimited'; UseDatabaseQuotaDefaults = $true; ArchiveState = 'None'
+                        ArchiveDatabase = $null; LitigationHoldEnabled = $false; RetentionPolicy = ''; HiddenFromAddressListsEnabled = $false
+                        ForwardingAddress = $null; ForwardingSmtpAddress = $null
+                    }
+                }
+            }
+            Mock -ModuleName $script:ModuleName Get-AcceptedDomain { [pscustomobject]@{ DomainName = 'contoso.com' } }
+            Mock -ModuleName $script:ModuleName Get-MailboxStatistics {
+                if ($Identity -like 'CN=DB02*') { throw "Exchange Information Store on server 'ex02.example.test' is inaccessible. (test)" }
+                [pscustomobject]@{ TotalItemSize = '1 GB (1,073,741,824 bytes)'; ItemCount = 10 }
+            }
+
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_MB_INV_01_MailboxInventory' -Run (New-TestRun)
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Get-MailboxStatistics -Times 3 -Exactly -ParameterFilter { $Identity -like 'CN=DB02*' }
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Get-MailboxStatistics -Times 2 -Exactly -ParameterFilter { $Identity -like 'CN=DB01*' }
+
+            $metrics = $result.findings[0].result.metrics
+            $metrics.statisticsFailures | Should -Be 3
+            $metrics.statisticsSkipped | Should -Be 2
+            $result.findings[0].result.rationale | Should -Match 'not requested for 2 mailboxes on 1 databases after 3 consecutive reads on each failed.*DB02 \(2 skipped\)'
+            @(Get-TestSectionRows -Result $result -Key 'mailbox.inventory').Count | Should -Be $script:DeclaredInvMailboxes.Count -Because 'skipped mailboxes are still inventoried, with size not measured'
+        }
+
+        It 'REPL-01 does not MAPI-test a database whose status did not come back, and names it' {
+            Mock -ModuleName $script:ModuleName Get-DatabaseAvailabilityGroup { }
+            Mock -ModuleName $script:ModuleName Get-MailboxDatabase {
+                New-TestDatabase -Name 'DB01'
+                New-TestDatabase -Name 'DB02' -Mounted $null -Size $null -LastFullBackup $null
+            }
+            Mock -ModuleName $script:ModuleName Test-MAPIConnectivity { [pscustomobject]@{ Server = 'EX01'; Result = 'Success'; Latency = '00:00:00.01'; Error = '' } }
+
+            $result = Invoke-TestCollector -Function 'Invoke-ExchCollector_REPL_01_ReplicationHealth' -Run (New-TestRun)
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Test-MAPIConnectivity -Times 1 -Exactly
+            Should -Invoke -ModuleName $script:ModuleName -CommandName Test-MAPIConnectivity -Times 0 -Exactly -ParameterFilter { $Database -eq 'DB02' }
+            $result.findings[0].result.rationale | Should -Match 'MAPI connectivity was not tested on them: DB02'
+            $result.findings[0].result.outcome | Should -Be 'Unknown'
         }
 
         It 'MB.DB-01 requests copy status by database name and reads sizes from text' {

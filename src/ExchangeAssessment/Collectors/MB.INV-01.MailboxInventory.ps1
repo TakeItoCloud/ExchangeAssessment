@@ -51,9 +51,20 @@ function Invoke-ExchCollector_MB_INV_01_MailboxInventory {
     $rows = New-Object System.Collections.Generic.List[object]
     $statisticsFailures = 0
 
+    # A database whose Information Store does not answer makes every statistics read on it wait
+    # for a timeout - about 12 seconds per mailbox on the first live run. After this many
+    # consecutive failures on one database with no success between them, its remaining mailboxes
+    # are not requested; they are reported as not measured, and the database is named.
+    $failuresBeforeSkip = [int](Get-ExchThreshold -Run $Run -Name 'Mailbox.StatisticsFailuresBeforeSkippingDatabase' -Default 3)
+    $failureStreak = @{}
+    $skippedDatabases = @{}
+    $statisticsSkipped = 0
+
     foreach ($mailbox in $mailboxes) {
         $sizeGb = $null
         $items = $null
+        $databaseKey = [string](Get-ExchObjectValue -InputObject $mailbox -Name 'Database' -Default '')
+        $skipStatistics = ($databaseKey -and $failuresBeforeSkip -gt 0 -and $skippedDatabases.ContainsKey($databaseKey))
         # The mailbox is passed as a string. Over the Exchange Management Shell's remote session
         # $mailbox.Identity arrives as a deserialized ADObjectId that -Identity cannot bind -
         # measured on the first live run, where every logged mailbox failed that way (the
@@ -61,6 +72,11 @@ function Invoke-ExchCollector_MB_INV_01_MailboxInventory {
         # GUID is the fallback.
         $statisticsIdentity = [string](Get-ExchObjectValue -InputObject $mailbox -Name 'DistinguishedName' -Default '')
         if (-not $statisticsIdentity) { $statisticsIdentity = [string](Get-ExchObjectValue -InputObject $mailbox -Name 'Guid' -Default '') }
+        if ($skipStatistics) {
+            $statisticsSkipped++
+            $skippedDatabases[$databaseKey]++
+        }
+        else {
         try {
             if (-not $statisticsIdentity) { throw 'The mailbox was returned without a DistinguishedName or Guid to request its statistics by.' }
             $statistics = Get-MailboxStatistics -Identity $statisticsIdentity -ErrorAction Stop
@@ -76,12 +92,23 @@ function Invoke-ExchCollector_MB_INV_01_MailboxInventory {
             $itemCount = Get-ExchObjectValue -InputObject $statistics -Name 'ItemCount'
             if ($null -ne $itemCount) { $items = [int64]$itemCount }
             if ($null -eq $sizeGb) { throw 'Get-MailboxStatistics returned no readable TotalItemSize.' }
+            if ($databaseKey) { $failureStreak[$databaseKey] = 0 }
         }
         catch {
             $statisticsFailures++
             if ($statisticsFailures -le 5) {
                 $null = Write-ExchError -Run $Run -Context ('Get-MailboxStatistics on {0}' -f $mailbox.Name) -ErrorRecord $_ -ControlId $control.controlId -Severity 'Warning'
             }
+            if ($databaseKey -and $failuresBeforeSkip -gt 0) {
+                $failureStreak[$databaseKey] = 1 + $(if ($failureStreak.ContainsKey($databaseKey)) { $failureStreak[$databaseKey] } else { 0 })
+                if ($failureStreak[$databaseKey] -ge $failuresBeforeSkip -and -not $skippedDatabases.ContainsKey($databaseKey)) {
+                    $skippedDatabases[$databaseKey] = 0
+                    Write-ExchEvent -Run $Run -Level WARN -Message 'Mailbox statistics skipped for database' -Data @{
+                        controlId = $control.controlId; database = $databaseKey; consecutiveFailures = $failureStreak[$databaseKey]; lastError = [string]$_.Exception.Message
+                    }
+                }
+            }
+        }
         }
 
         $quotaGb = Convert-ExchQuotaToGb -Quota $mailbox.ProhibitSendQuota
@@ -138,6 +165,7 @@ function Invoke-ExchCollector_MB_INV_01_MailboxInventory {
         capped             = $capped
         cap                = $maxMailboxes
         statisticsFailures = $statisticsFailures
+        statisticsSkipped  = $statisticsSkipped
         errors             = @($errors.ToArray())
     })
 
@@ -171,6 +199,12 @@ function Invoke-ExchCollector_MB_INV_01_MailboxInventory {
     if ($large.Count -gt 0) {
         $problems.Add(("{0} mailboxes exceed {1} GB and are worth reviewing for archiving" -f $large.Count, $largeGb)) | Out-Null
         $outcomes.Add('PartiallyCompliant') | Out-Null
+    }
+    if ($skippedDatabases.Count -gt 0) {
+        $problems.Add(("Statistics were not requested for {0} mailboxes on {1} databases after {2} consecutive reads on each failed, so their size is not measured: {3}" -f `
+            $statisticsSkipped, $skippedDatabases.Count, $failuresBeforeSkip, `
+            ((@($skippedDatabases.Keys | Sort-Object) | ForEach-Object { "$_ ($($skippedDatabases[$_]) skipped)" }) -join ', '))) | Out-Null
+        $outcomes.Add('Unknown') | Out-Null
     }
     if ($unsized.Count -gt 0) {
         $problems.Add(("Statistics could not be read for {0} mailboxes, so their size is unknown" -f $unsized.Count)) | Out-Null
@@ -210,6 +244,7 @@ function Invoke-ExchCollector_MB_INV_01_MailboxInventory {
             largeMailboxes   = $large.Count
             externalForwarders = $forwarders.Count
             statisticsFailures = $statisticsFailures
+            statisticsSkipped  = $statisticsSkipped
             capped           = $capped
         } `
         -Meta @{ dataSources = @{ Exchange = @{ state = $(if ($errors.Count -gt 0 -or $capped) { 'Partial' } else { 'Success' }); reason = ($errors -join '; ') } }; evaluationStatus = 'Complete' }

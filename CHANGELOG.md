@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — 2026-09-26 (phase P3.7, findings the second live run showed to be wrong)
+
+The second run completed with 34 of 34 collectors and 35 warning rows. Its findings, read against
+Microsoft Learn, showed several verdicts that were the tool's error rather than the organisation's.
+
+- **`TR.CO-01` no longer calls a connector that offers Basic only after TLS unprotected.** The
+  check matched the text `BasicAuth` inside `BasicAuthRequireTLS`, so every connector carrying
+  Exchange's default mechanisms was reported as sending credentials unprotected (34 on the second
+  run). Mechanisms are now compared one by one, and a connector carrying `BasicAuthRequireTLS`
+  ("Offer basic authentication only after starting TLS", Learn, Receive connectors, read
+  2026-09-26) is not flagged. New helper `Test-ExchAuthMechanismUnprotected`.
+- **`CERT-01` judges a self-signed certificate by the IIS site it is bound to.** Setup binds its
+  self-signed "Microsoft Exchange" certificate to W3SVC/1 and W3SVC/2, and the Exchange Back End
+  binding must stay (Learn, Digital certificates and encryption in Exchange Server, read
+  2026-09-26). Only a self-signed certificate on W3SVC/1 (Default Web Site) is now flagged; one
+  whose `IISServices` was not returned is reported as not determinable. New columns `IISSites`
+  and `ClientFacingIis`.
+- **`EX.VDIR-01` does not judge the PowerShell directory's HTTP internal URL.** The Exchange
+  Management Shell reaches it over HTTP with Kerberos (Learn KB 2276957, read 2026-09-26). New
+  threshold `VirtualDirectory.HttpInternalUrlAllowedTypes`, default `powershell`; external URLs are
+  still judged for every type.
+- **`HYB-01` no longer says mail flow depends on the intra-organization connector.** Learn states
+  the connector provides "feature availability and service connectivity across the organizations";
+  it does not carry mail flow. A missing or disabled connector is now `PartiallyCompliant`, not
+  `NonCompliant`, and the rationale says whether none exists or none is enabled.
+- **`MB.AV-01` no longer reports gaps it could not measure.** `@($null)` has a Count of 1, and
+  Defender returns `$null` for an empty list, so every server on the second run showed one path and
+  one process exclusion, both empty, and 19 gaps. Entries are now cleaned first (new helper
+  `Get-ExchExclusionView`). A server is reported as not assessed, naming the reason, when Defender
+  returns no exclusions at all (none configured and hidden by `HideExclusionsFromLocalAdmins` look
+  the same), returns its "N/A" placeholder, or is not the primary product (`AMRunningMode` other
+  than Normal, read with `Get-MpComputerStatus`). This closes plan row P3.6 without reading the
+  policy itself.
+- **Warnings are captured in the Exchange Management Shell.** Measured on the second run: `3>&1`
+  caught none of the warnings Exchange's remote commands printed; `-WarningVariable` on the cmdlet
+  did. `Invoke-ExchWithWarningCapture` now also sets `-WarningVariable` as a default for every
+  command a query runs, through a copy of `$PSDefaultParameterValues` local to the function, and
+  keeps the stream path. Each distinct warning is recorded once, with the raw count each path saw
+  (`capturedByStream`, `capturedByVariable`) - capture counts, not occurrences. Console output is
+  unchanged.
+- **`MB.INV-01` stops waiting on a store that does not answer.** After
+  `Mailbox.StatisticsFailuresBeforeSkippingDatabase` consecutive failures on one database (default
+  3; 0 turns it off), its remaining mailboxes are not requested and are reported as not measured,
+  naming the database. On the second run each read against the unreachable store failed after
+  about 12.6 s.
+- **`REPL-01` does not MAPI-test a database whose status did not come back**, and names it as not
+  tested instead of waiting on the same unreachable store.
+
+Ten regression tests cover the changes; all 41 mutation guards across P3.1 and P3.7 were shown
+red with the old code restored and each file put back byte-identical by SHA-256.
+
+**Changed.** `ModuleVersion` is **0.9.0**: outcomes, rationales or sections change for
+`TR.CO-01`, `CERT-01`, `EX.VDIR-01`, `HYB-01`, `MB.AV-01`, `MB.INV-01` and `REPL-01`, and - where
+Exchange's warnings are now captured - for `DAG-01` and `MB.DB-01`.
+
 ### Fixed — 2026-09-26 (phase P3.1 follow-up, `EX.VDIR-01` per server and streamed query output)
 
 Two defects that 0.7.0 did not fix, found after its merge while answering why the first live run

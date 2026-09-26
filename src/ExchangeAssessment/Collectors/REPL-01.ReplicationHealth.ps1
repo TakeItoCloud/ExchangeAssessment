@@ -43,15 +43,21 @@ function Invoke-ExchCollector_REPL_01_ReplicationHealth {
     }
 
     $mapiRows = New-Object System.Collections.Generic.List[object]
+    $mapiNotTested = New-Object System.Collections.Generic.List[string]
     foreach ($db in @(Invoke-ExchQuery -Label 'Get-MailboxDatabase' -Errors $errors -Run $Run -ControlId $control.controlId -Script { Get-MailboxDatabase -Status -ErrorAction Stop })) {
-        # Only a database measured as dismounted is skipped; MB.DB-01 reports it. One whose
-        # Mounted state did not come back is tested, so the test says what the status read could
-        # not. The database is passed by name, a string: over the Exchange Management Shell's
-        # remote session $db.Identity is a deserialized ADObjectId that -Database cannot bind -
+        # A database measured as dismounted is skipped; MB.DB-01 reports it. One whose Mounted
+        # state did not come back is not tested either: its Information Store did not answer the
+        # status read, and a MAPI test against it can only wait for the same timeout. (REPL-01
+        # took 647 seconds on the second live run; how much of that was these tests and how much
+        # Test-ReplicationHealth was not recorded.) It is named as not tested instead.
+        # The database is passed by name, a string: over the Exchange Management Shell's remote
+        # session $db.Identity is a deserialized ADObjectId that -Database cannot bind -
         # measured on the first live run, which logged 20 failures of exactly that form.
         $dbName = [string](Get-ExchObjectValue -InputObject $db -Name 'Name' -Default '')
         if (-not $dbName) { continue }
-        if ((Get-ExchObjectBool -InputObject $db -Name 'Mounted') -eq $false) { continue }
+        $mounted = Get-ExchObjectBool -InputObject $db -Name 'Mounted'
+        if ($mounted -eq $false) { continue }
+        if ($null -eq $mounted) { $mapiNotTested.Add($dbName) | Out-Null; continue }
         foreach ($result in @(Invoke-ExchQuery -Label ("Test-MAPIConnectivity on {0}" -f $dbName) -Errors $errors -Run $Run -ControlId $control.controlId -Script { Test-MAPIConnectivity -Database $dbName -ErrorAction Stop })) {
             $mapiRows.Add([pscustomobject]@{
                 Database = $dbName
@@ -70,6 +76,7 @@ function Invoke-ExchCollector_REPL_01_ReplicationHealth {
     $evidence = Write-ExchEvidenceFile -Run $Run -RelativePath 'mailbox/replication-health.json' -ContentObject ([ordered]@{
         replicationChecks = $replArr
         mapiConnectivity  = $mapiArr
+        mapiNotTested     = @($mapiNotTested.ToArray())
         dagMembers        = $members
         errors            = @($errors.ToArray())
     })
@@ -116,6 +123,11 @@ function Invoke-ExchCollector_REPL_01_ReplicationHealth {
         $outcomes.Add('NonCompliant') | Out-Null
     }
 
+    if ($mapiNotTested.Count -gt 0) {
+        $problems.Add(("{0} databases returned no status from their Information Store, so MAPI connectivity was not tested on them: {1}" -f `
+            $mapiNotTested.Count, ($mapiNotTested -join ', '))) | Out-Null
+        $outcomes.Add('Unknown') | Out-Null
+    }
     if ($errors.Count -gt 0) {
         $problems.Add(("Some probes could not be run: {0}" -f ($errors -join '; '))) | Out-Null
         $outcomes.Add('Unknown') | Out-Null
@@ -134,7 +146,7 @@ function Invoke-ExchCollector_REPL_01_ReplicationHealth {
                         $replArr.Count, $members.Count, $mapiArr.Count) }
 
     $finding = New-ExchControlFinding -Control $control -Severity $severity -Outcome $outcome `
-        -Sufficiency $(if ($errors.Count -gt 0) { 'SoftFail' } else { 'Pass' }) `
+        -Sufficiency $(if ($errors.Count -gt 0 -or $mapiNotTested.Count -gt 0) { 'SoftFail' } else { 'Pass' }) `
         -Rationale $rationale `
         -Evidence @($evidence) `
         -Remediation 'Work each failing replication check on the server that reported it, starting with cluster and quorum checks, then log replay and content index. A database that fails MAPI connectivity is not serving clients and takes priority over everything else here.' `
@@ -143,6 +155,7 @@ function Invoke-ExchCollector_REPL_01_ReplicationHealth {
             checksRun         = $replArr.Count
             checksFailed      = $failedChecks.Count
             databasesProbed   = $mapiArr.Count
+            databasesNotTested = $mapiNotTested.Count
             mapiFailures      = $failedMapi.Count
         } `
         -Meta @{ dataSources = @{ Exchange = @{ state = $(if ($errors.Count -gt 0) { 'Partial' } else { 'Success' }); reason = ($errors -join '; ') } }; evaluationStatus = 'Complete' }

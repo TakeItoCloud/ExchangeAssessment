@@ -17,11 +17,14 @@ evaluate" from "passed", and the analyzer suspensions below are gone.
 | P2 | Retire the four analyzer suspensions (see *Inherited analyzer debt*) | Mostly done | 2026-08-31 |
 | P3 | Runtime verification against a live Exchange organisation | In progress - first live run 2026-09-26 (see *P3*); fixes are P3.1, re-run is P3.2 | 2026-09-26 |
 | P3.1 | Fix what the first live run exposed: four collectors crashed on properties real objects do not carry, four passed deserialized identities back to cmdlets, sizes read with `ToBytes()`, `PTCH-01` called a script as a cmdlet, cmdlet warnings were lost, and `MB.DB-01`/`CAS-01` reported unread values as measured (see *P3*) | In progress - green over mocks; the run that proves it is P3.2 | 2026-09-26 |
-| P3.2 | Re-run `Invoke-ExchAssess.ps1` on the same organisation after P3.1 and compare `run.errors.csv` against the first run - owner: Carlos Annes (operator) | Planned | |
+| P3.2 | Re-run `Invoke-ExchAssess.ps1` on the same organisation after P3.1 and compare `run.errors.csv` against the first run - owner: Carlos Annes (operator) | Done - second live run 2026-09-26 on 0.8.0: 34 of 34 collectors ran, none failed, `run.errors.csv` 140 -> 35 rows, all of the remainder on the two known-unreachable servers or expected; findings reviewed, defects are P3.7 (see *P3*) | 2026-09-26 |
 | P3.3 | Reported by P3.1: `Test-ExchPolicyBlocksBasicAuth` (`CAS-01`) treats a protocol property a policy does not carry as blocked, so an absent property reads as a pass; read the on-premises authentication policy property set on Learn and make an absent one Unknown | Planned | |
 | P3.4 | Reported by P3.1: only the four collectors that crashed were moved to guarded property reads. The others still read Exchange object properties directly under strict mode; audit them against Learn and the P3.2 run | Planned | |
 | P3.5 | Reported by P3.1: warnings are now recorded for every query, but only `DAG-01` and `MB.DB-01` judge on them. `SRV-01`, `CERT-01`, `EX.VDIR-01` and `TR.QUE-01` read per-server state that Exchange reports partially through warnings; decide per control whether a warning makes its verdict Unknown | Planned | |
-| P3.6 | Reported by P3.1: `MB.AV-01` cannot tell "no exclusions configured" from "exclusions hidden". With Defender's `HideExclusionsFromLocalAdmins` set, `Get-MpPreference` shows none even to an administrator, and every recommended exclusion would be reported missing. Read the policy state and report such a server as not assessable | Planned | |
+| P3.6 | Reported by P3.1: `MB.AV-01` cannot tell "no exclusions configured" from "exclusions hidden". With Defender's `HideExclusionsFromLocalAdmins` set, `Get-MpPreference` shows none even to an administrator, and every recommended exclusion would be reported missing. Read the policy state and report such a server as not assessable | Done in P3.7 - such a server is reported as not assessed, naming the reason; the policy itself is not read | 2026-09-26 |
+| P3.7 | Fix what the second live run's findings exposed: `TR.CO-01` read `BasicAuthRequireTLS` as unprotected Basic; `CERT-01` flagged Exchange's default back-end self-signed certificate; `EX.VDIR-01` flagged the PowerShell directory's HTTP internal URL; `HYB-01` claimed mail flow depends on the intra-organization connector; `MB.AV-01` counted `@($null)` as an exclusion and judged servers whose list it could not see; warnings still not captured in the Exchange Management Shell; `MB.INV-01` and `REPL-01` waited on an unreachable store per mailbox and per database (see *P3*) | In progress - green over mocks; the run that proves it is P3.8 | 2026-09-26 |
+| P3.8 | Third live run after P3.7 on the same organisation: confirm `run.errors.csv` now carries `(warning)` rows with `capturedByVariable` counts, `MB.INV-01` and `REPL-01` run in minutes, and the `TR.CO-01`, `CERT-01`, `EX.VDIR-01`, `HYB-01` and `MB.AV-01` findings read as P3.7 intends - owner: Carlos Annes (operator) | Planned | |
+| P3.9 | Reported by P3.7: `DNS-01` asks for DMARC on the tenant's `*.mail.onmicrosoft.com` coexistence domains, which Microsoft manages; decide from Learn whether those domains should be excluded from the DMARC check | Planned | |
 | P4 | Finish the AV exclusion check — compare, do not just report | Done | 2026-08-31 |
 | P5 | Operational health checks: service, mail flow, replication, queues, index | Done | 2026-09-01 |
 | P6 | Ignore list, alerting and scheduled-run modes | Dropped | 2026-09-02 |
@@ -124,6 +127,21 @@ operator. What it showed, by cause:
   whole organisation; the read fails as a whole when one server's IIS does not answer, and all
   nine reads failed on one unreachable member - taking the servers that did answer with them,
   the assessment host included.
+
+**Second live run - 2026-09-26, on 0.8.0.** 34 of 34 on-premises collectors ran and none failed;
+`run.errors.csv` fell from 140 to 35 rows, every one a warning, 32 of them on the two known
+unreachable DAG members. Reviewing the findings against Learn found tool judgements that were
+wrong, not the organisation: `TR.CO-01` matched the text `BasicAuth` inside `BasicAuthRequireTLS`
+("Offer basic authentication only after starting TLS") and called 34 connectors unprotected;
+`CERT-01` flagged the "Microsoft Exchange" self-signed certificate that setup binds to the Exchange
+Back End site; `EX.VDIR-01` flagged the PowerShell directory's HTTP internal URL, which the
+Exchange Management Shell uses with Kerberos; `HYB-01` said mail flow depends on the
+intra-organization connector; and `MB.AV-01` reported 19 gaps on each of six servers from which
+Defender returned no exclusions at all, counting `@($null)` as one. Warning capture was measured
+in the same shell: `3>&1` caught none of the warnings Exchange's remote commands printed,
+`-WarningVariable` did. `MB.INV-01` took 731 s and `REPL-01` 648 s; each mailbox statistics read
+against the unreachable store failed after about 12.6 s, and how much of `REPL-01`'s time went to
+MAPI tests against those databases was not recorded. P3.7 fixes these.
 
 P3.1 fixes the tool defects. Each fix has a regression test built from the shape measured, with
 fictional values, and each test was shown red with the old code restored. Green over mocks proves

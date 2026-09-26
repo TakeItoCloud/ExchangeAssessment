@@ -169,8 +169,16 @@ function Invoke-ExchCollector_HYB_01_HybridConfig {
         $outcomes.Add('Unknown') | Out-Null
     }
     elseif ($enabledConnectors.Count -eq 0) {
-        $problems.Add('Hybrid is configured but no intra-organization connector is enabled, so cross-premises free/busy and mail flow will not work') | Out-Null
-        $outcomes.Add('NonCompliant') | Out-Null
+        # Learn states what the connector is for - "feature availability and service connectivity
+        # across the organizations" - and that the Hybrid Configuration wizard creates it; it does
+        # not carry mail flow, which runs over send and receive connectors, and Learn does not state
+        # that hybrid fails without it. So this is reported, not failed. Source:
+        # https://learn.microsoft.com/powershell/module/exchangepowershell/new-intraorganizationconnector?view=exchange-ps
+        # (read 2026-09-26).
+        $state = $(if ($connectorArr.Count -eq 0) { 'no intra-organization connector exists' }
+                    else { ("{0} intra-organization connectors exist and none is enabled: {1}" -f $connectorArr.Count, (($connectorArr | ForEach-Object { $_.Name }) -join ', ')) })
+        $problems.Add(("Hybrid is configured but {0}. The intra-organization connector provides feature availability and service connectivity between the on-premises and Exchange Online organizations (for example OAuth-based free/busy); confirm whether this deployment relies on it, and re-run the Hybrid Configuration wizard if it should" -f $state)) | Out-Null
+        $outcomes.Add('PartiallyCompliant') | Out-Null
     }
 
     $enabledAuthServers = @($oauthArr | Where-Object { $_.Kind -eq 'AuthServer' -and $_.Enabled -eq $true })

@@ -36,9 +36,49 @@ function Invoke-ExchCollector_MB_AV_01_AVExclusions {
     foreach ($srv in $servers) {
         $name = [string]$srv.Name
         try {
-            $preference = Invoke-Command -ComputerName $name -ScriptBlock { Get-MpPreference } -ErrorAction Stop
-            $paths     = @($preference.ExclusionPath)
-            $processes = @($preference.ExclusionProcess)
+            # Defender's running mode is read alongside the preferences: a server whose
+            # Defender is not the primary anti-malware product (passive or EDR block mode) has
+            # its real exclusions elsewhere. A failed status read leaves the mode $null and
+            # does not block the exclusion read.
+            $reading = Invoke-Command -ComputerName $name -ErrorAction Stop -ScriptBlock {
+                $preference = Get-MpPreference -ErrorAction Stop
+                $mode = $null
+                try { $mode = [string](Get-MpComputerStatus -ErrorAction Stop).AMRunningMode } catch { $mode = $null }
+                [pscustomobject]@{ ExclusionPath = @($preference.ExclusionPath); ExclusionProcess = @($preference.ExclusionProcess); RunningMode = $mode }
+            }
+            $view      = Get-ExchExclusionView -Paths $reading.ExclusionPath -Processes $reading.ExclusionProcess
+            $paths     = @($view.Paths)
+            $processes = @($view.Processes)
+            $runningMode = [string]$reading.RunningMode
+
+            # Three readings cannot be compared against the recommended list, and each is
+            # reported as not assessed rather than as a full set of gaps:
+            # - Defender is not the primary product, so its list is not the one that applies;
+            # - Defender answered with its "N/A: Must be an administrator" placeholder, so the list is hidden;
+            # - Defender answered with no exclusions at all, which is either none configured or
+            #   exclusions hidden by HideExclusionsFromLocalAdmins
+            #   (https://learn.microsoft.com/defender-endpoint/microsoft-defender-antivirus-exclusions-configure,
+            #   read 2026-09-26) - one reading cannot tell those apart. On the first live run
+            #   every server answered this way and was reported with the full 19 gaps.
+            $notReadReason = ''
+            if ($runningMode -and $runningMode -notmatch '^Normal') {
+                $notReadReason = "Microsoft Defender is running in '$runningMode' mode, so it is not the primary anti-malware product and its exclusion list is not the one that applies"
+            }
+            elseif ($view.Hidden) {
+                $notReadReason = 'Defender returned a placeholder instead of its exclusion list, so the list is hidden from this account'
+            }
+            elseif ($paths.Count -eq 0 -and $processes.Count -eq 0) {
+                $notReadReason = 'Defender returned no exclusions at all: either none are configured, or they are hidden by the HideExclusionsFromLocalAdmins policy - one reading cannot tell these apart'
+            }
+
+            if ($notReadReason) {
+                $serverRows.Add([pscustomobject]@{
+                    Server = $name; Status = 'Not assessed'; ExclusionPaths = ''; ExclusionProcesses = ''
+                    PathCount = $paths.Count; ProcessCount = $processes.Count; MissingPathCount = 0; MissingProcessCount = 0
+                    Reason = $notReadReason
+                }) | Out-Null
+                continue
+            }
 
             $missingPaths     = @($requiredPaths     | Where-Object { -not (Test-ExchExclusionCovered -Token $_ -Configured $paths) })
             $missingProcesses = @($requiredProcesses | Where-Object { -not (Test-ExchExclusionCovered -Token $_ -Configured $processes) })
@@ -155,4 +195,37 @@ function Test-ExchExclusionCovered {
         if ($entry -like ("*{0}*" -f $Token)) { return $true }
     }
     return $false
+}
+
+function Get-ExchExclusionView {
+    <#
+    The exclusion entries Defender actually returned, with nothing counted that is not one.
+
+    @($null) has a Count of 1, and Defender returns $null for an empty list - on the first live
+    run every server showed one path and one process exclusion, both empty. Entries that are
+    $null or blank are dropped. An entry beginning 'N/A' is Defender's placeholder for a list the
+    caller may not see ("N/A: Must be an administrator to view exclusions"); it is not an
+    exclusion, and it marks the view as hidden.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()][object[]]$Paths = @(),
+        [Parameter()][object[]]$Processes = @()
+    )
+
+    $hidden = $false
+    $cleanPaths = New-Object System.Collections.Generic.List[string]
+    $cleanProcesses = New-Object System.Collections.Generic.List[string]
+
+    foreach ($pair in @(@{ Source = $Paths; Target = $cleanPaths }, @{ Source = $Processes; Target = $cleanProcesses })) {
+        foreach ($entry in @($pair.Source)) {
+            if ($null -eq $entry) { continue }
+            $text = ([string]$entry).Trim()
+            if (-not $text) { continue }
+            if ($text -like 'N/A*') { $hidden = $true; continue }
+            $pair.Target.Add($text) | Out-Null
+        }
+    }
+
+    [pscustomobject]@{ Paths = @($cleanPaths.ToArray()); Processes = @($cleanProcesses.ToArray()); Hidden = $hidden }
 }

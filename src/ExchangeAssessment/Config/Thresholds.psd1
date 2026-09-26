@@ -261,6 +261,13 @@ statement it says so.
     VirtualDirectory = @{
         RequireExternalUrl     = @('owa', 'ecp', 'ews', 'oab', 'mapi', 'activesync')
         RequireHttps           = $true
+        # Directory types whose internal URL is HTTP by design and is not judged by RequireHttps.
+        # The Exchange Management Shell connects to the PowerShell directory over HTTP with
+        # Kerberos; requiring SSL on it stops the shell connecting. Source: Learn KB 2276957,
+        # https://learn.microsoft.com/troubleshoot/exchange/administration/http-403-error-start-ems
+        # ("this option isn't needed because Exchange Server uses Kerberos authentication"),
+        # read 2026-09-26. External URLs are still judged for every type.
+        HttpInternalUrlAllowedTypes = @('powershell')
         # Basic authentication on an internet-facing directory is a credential-theft path.
         FlagBasicAuthentication = $true
         # Every server should present the same external URL for a given directory type.
@@ -373,6 +380,11 @@ statement it says so.
         # Cap the enumeration so a very large organisation cannot make a run take hours.
         # 0 means no cap.
         MaxMailboxes        = 5000
+        # After this many consecutive statistics failures on one database, its remaining
+        # mailboxes are not requested and are reported as not measured. A store that does not
+        # answer costs a timeout per mailbox (about 12 s each on the first live run).
+        # 0 turns this off and requests every mailbox.
+        StatisticsFailuresBeforeSkippingDatabase = 3
     }
 
     # --------------------------------------------------------------------------------------

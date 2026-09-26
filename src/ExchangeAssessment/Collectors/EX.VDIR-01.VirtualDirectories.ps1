@@ -163,8 +163,14 @@ function Invoke-ExchCollector_EX_VDIR_01_VirtualDirectories {
     $requireConsistent = [bool](Get-ExchThreshold -Run $Run -Name 'VirtualDirectory.RequireConsistentUrls' -Default $true)
 
     $missingExternal = @($vdirArr | Where-Object { ($requireExternal -contains $_.Type) -and -not $_.ExternalUrl })
+    # A type listed in HttpInternalUrlAllowedTypes has an HTTP internal URL by design (the
+    # PowerShell directory, which the Exchange Management Shell reaches over HTTP with Kerberos);
+    # its external URL is still judged.
+    $httpInternalAllowed = @(Get-ExchThreshold -Run $Run -Name 'VirtualDirectory.HttpInternalUrlAllowedTypes' -Default @('powershell'))
     $plainHttp = @($vdirArr | Where-Object {
-        $requireHttps -and (($_.InternalUrl -and -not $_.InternalHttps) -or ($_.ExternalUrl -and -not $_.ExternalHttps))
+        $requireHttps -and (
+            ($_.InternalUrl -and -not $_.InternalHttps -and ($httpInternalAllowed -notcontains $_.Type)) -or
+            ($_.ExternalUrl -and -not $_.ExternalHttps))
     })
     $basicExposed = @($vdirArr | Where-Object { $flagBasic -and $_.BasicAuthentication -and $_.ExternalUrl })
 
