@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — 2026-09-26 (phase P3.1 follow-up, `EX.VDIR-01` per server and streamed query output)
+
+Two defects that 0.7.0 did not fix, found after its merge while answering why the first live run
+assessed no virtual directory on the server it ran on.
+
+- **`EX.VDIR-01` reads virtual directories and Outlook Anywhere per server.** Read once for the
+  whole organisation, each `Get-*VirtualDirectory` failed as a whole when one server's IIS did not
+  answer; on the first live run one unreachable member failed all nine reads, and the server the
+  assessment ran on was lost with them. Each Mailbox or ClientAccess server from
+  `Get-ExchangeServer` is now read on its own (Edge Transport servers are skipped), a new
+  `exchange.virtual-directory-reads` section records every read per server and type, and the
+  rationale names the servers that could not be read. With no server list the organisation-wide
+  read is kept as the fallback. The Autodiscover SCP rows use guarded reads.
+- **Query output is streamed, not buffered - a regression in 0.7.0.** 0.7.0's
+  `Invoke-ExchWithWarningCapture` collected a query's output before returning it, so a query that
+  returned some objects and then failed lost them all; the plain `& $Script` it replaced kept them.
+  It now passes objects through as they arrive. Every collector that reads through
+  `Invoke-ExchQuery` was affected in 0.7.0.
+- README **Permissions** now states why `MB.AV-01` and `TLS-01` need a local administrator and an
+  elevated shell, from Learn's
+  [about_Remote_Requirements](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_remote_requirements)
+  (read 2026-09-26): the default remoting endpoint admits only Administrators, and a connection to
+  the local computer needs Run as administrator.
+- New plan row **P3.6**: `MB.AV-01` cannot tell hidden Defender exclusions
+  (`HideExclusionsFromLocalAdmins`) from absent ones.
+
+Two regression tests cover the changes, guarding five mutations. Together with the 21 from 0.7.0,
+all 26 were shown red with the old code restored, each file put back byte-identical by SHA-256.
+
+**Changed.** `ModuleVersion` is **0.8.0**: `EX.VDIR-01`'s outcome, rationale and sections change.
+
 ### Fixed — 2026-09-26 (phase P3.1, defects exposed by the first live run)
 
 The first run against a real Exchange organisation (P3) completed and wrote every output, with 140
@@ -58,29 +89,14 @@ was shown red with the old code put back, and the file restored byte-for-byte by
   account was refused `Get-AuthenticationPolicy` by RBAC.
 - `REPL-01` tests MAPI connectivity on a database whose `Mounted` state was not returned, skipping
   only one measured as dismounted.
-- **`EX.VDIR-01` reads virtual directories and Outlook Anywhere per server.** Read once for the
-  whole organisation, each `Get-*VirtualDirectory` failed as a whole when one server's IIS did not
-  answer, and on the first live run the server the assessment ran on was lost with it. Each
-  Mailbox or ClientAccess server from `Get-ExchangeServer` is now read on its own (Edge Transport
-  servers are skipped), a new `exchange.virtual-directory-reads` section records every read per
-  server and type, and the rationale names the servers that could not be read. With no server
-  list the organisation-wide read is kept as the fallback. The Autodiscover SCP rows use guarded
-  reads.
-- **Query output is streamed, not buffered.** `Invoke-ExchWithWarningCapture` passes objects through
-  as they arrive, so a query that returns some objects and then fails keeps them - as the plain
-  `& $Script` it replaced did. A buffered first version of this change discarded them; it never
-  reached `main`.
-- README **Permissions** now states why `MB.AV-01` and `TLS-01` need a local administrator and an
-  elevated shell, from Learn's `about_Remote_Requirements`.
 
 **Not changed, and recorded as plan rows:** `Test-ExchPolicyBlocksBasicAuth` still treats an absent
 protocol property as blocked (P3.3); collectors other than the four that crashed still read
 properties directly (P3.4); `SRV-01`, `CERT-01`, `EX.VDIR-01` and `TR.QUE-01` record warnings but
-do not yet judge on them (P3.5); `MB.AV-01` cannot tell hidden Defender exclusions from absent
-ones (P3.6). Green over mocks proves the mocks: the re-run is P3.2, owned by
+do not yet judge on them (P3.5). Green over mocks proves the mocks: the re-run is P3.2, owned by
 the operator.
 
-**Changed.** `ModuleVersion` is **0.7.0**: outcomes and rationales change for ten controls, which
+**Changed.** `ModuleVersion` is **0.7.0**: outcomes and rationales change for nine controls, which
 the PORT-PLAN rule treats as a minor bump.
 
 ### Added — 2026-09-11 (phases P14.5 and P14.6, `DEP.VOL-01` and `DEP-01`)
